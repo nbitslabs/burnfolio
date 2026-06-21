@@ -1,0 +1,79 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/nbitslabs/burnfolio/internal/usage"
+)
+
+func TestSyncReportPostsDailyTotals(t *testing.T) {
+	var gotAuth string
+	var gotPayload syncPayload
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ingest" {
+			t.Fatalf("path = %q, want /api/ingest", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q, want POST", r.Method)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(syncResult{OK: true, UpsertedDays: 2})
+	}))
+	defer server.Close()
+
+	report := usage.Report{
+		Segments: []usage.Bucket{
+			{DateUTC: "2026-06-22", Records: 2, Usage: usage.TokenUsage{Input: 10, Output: 5}},
+			{DateUTC: "2026-06-21", Records: 1, Usage: usage.TokenUsage{Total: 42}},
+			{DateUTC: "2026-06-22", Records: 3, Usage: usage.TokenUsage{CacheRead: 7, CacheWrite: 8}},
+			{DateUTC: "(unknown)", Records: 99, Usage: usage.TokenUsage{Total: 99}},
+		},
+	}
+
+	result, err := syncReport(context.Background(), server.URL, "bf_profile", "bfm_secret", report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UpsertedDays != 2 {
+		t.Fatalf("upserted days = %d, want 2", result.UpsertedDays)
+	}
+	if gotAuth != "Bearer bfm_secret" {
+		t.Fatalf("authorization = %q", gotAuth)
+	}
+	if gotPayload.Profile != "bf_profile" {
+		t.Fatalf("profile = %q", gotPayload.Profile)
+	}
+	if len(gotPayload.Days) != 2 {
+		t.Fatalf("days = %d, want 2: %#v", len(gotPayload.Days), gotPayload.Days)
+	}
+	if gotPayload.Days[0].DateUTC != "2026-06-21" || gotPayload.Days[0].Usage.Total != 42 || gotPayload.Days[0].Records != 1 {
+		t.Fatalf("bad first day: %#v", gotPayload.Days[0])
+	}
+	if gotPayload.Days[1].DateUTC != "2026-06-22" || gotPayload.Days[1].Usage.Total != 30 || gotPayload.Days[1].Records != 5 {
+		t.Fatalf("bad second day: %#v", gotPayload.Days[1])
+	}
+}
+
+func TestSyncReportReturnsServerErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(syncResult{Error: "profile_machine_mismatch"})
+	}))
+	defer server.Close()
+
+	_, err := syncReport(context.Background(), server.URL, "someone_else", "bfm_secret", usage.Report{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != "profile_machine_mismatch" {
+		t.Fatalf("error = %q", err.Error())
+	}
+}
