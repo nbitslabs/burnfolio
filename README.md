@@ -19,13 +19,23 @@ Current collectors:
 go run ./cmd/pyro
 ```
 
+Build or install the local CLI:
+
+```sh
+make build
+./bin/pyro
+
+go install ./cmd/pyro
+pyro
+```
+
 Useful flags:
 
 ```sh
-go run ./cmd/pyro -providers claude,codex
-go run ./cmd/pyro -json
-go run ./cmd/pyro -home /path/to/home
-go run ./cmd/pyro -profile bf_ab12cd34 -machine bfm_...
+pyro -providers claude,codex
+pyro -json
+pyro -home /path/to/home
+pyro -profile bf_ab12cd34 -machine bfm_...
 ```
 
 The table output is grouped by UTC date, CLI, and model. JSON output includes

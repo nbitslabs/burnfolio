@@ -3,6 +3,7 @@ reference.md
 node_modules/
 dist/
 build/
+bin/
 .wrangler/
 .dev.vars
 *.log
