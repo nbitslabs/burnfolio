@@ -2,6 +2,7 @@
 reference.md
 node_modules/
 dist/
+worker/styles.generated.css
 build/
 bin/
 .wrangler/

@@ -106,3 +106,17 @@ Profiles expose both iframe and SVG embeds:
 ```
 
 See `examples/embed.html` for a complete third-party page template.
+
+## Web UI Build
+
+The Cloudflare Worker keeps its UI code in `worker/index.js` and its stylesheet
+in `worker/styles.css`. Tailwind processes and minifies the stylesheet, then the
+build step writes the deployable Worker to `dist/worker/index.js`.
+
+```sh
+npm install
+npm run build:ui
+```
+
+`make deploy` runs the UI build before `wrangler deploy`, so production deploys
+use the generated Worker bundle.

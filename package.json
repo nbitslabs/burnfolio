@@ -1,0 +1,13 @@
+{
+  "name": "burnfolio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:css": "BROWSERSLIST_IGNORE_OLD_DATA=true tailwindcss -c tailwind.config.js -i worker/styles.css -o worker/styles.generated.css --minify",
+    "build:worker": "node scripts/build-worker.mjs",
+    "build:ui": "npm run build:css && npm run build:worker"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

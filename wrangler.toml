@@ -1,5 +1,5 @@
 name = "burnfolio"
-main = "worker/index.js"
+main = "dist/worker/index.js"
 compatibility_date = "2026-06-21"
 workers_dev = true
 routes = [

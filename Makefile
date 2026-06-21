@@ -1,4 +1,4 @@
-.PHONY: build test install deploy
+.PHONY: build test install ui deploy
 
 build:
 	go build -o bin/pyro ./cmd/pyro
@@ -9,5 +9,8 @@ test:
 install:
 	go install ./cmd/pyro
 
-deploy:
+ui:
+	npm run build:ui
+
+deploy: ui
 	wrangler deploy
