@@ -420,28 +420,51 @@ async function uniqueAccountNumber(env) {
 
 function homePage() {
   return layout("Burnfolio", `
-    <main class="hero">
-      <section>
+    <main class="landing">
+      <section class="hero">
+        <div class="hero-copy">
         <p class="eyebrow">Token burn profiles for AI-native builders</p>
         <h1>Show your AI work like a contribution graph.</h1>
         <p class="lede">Burnfolio turns local Claude, Codex, OpenCode, and Pi usage into a public token-burn profile for you, your machines, and your orgs.</p>
         <form class="signup" method="post" action="/api/signup" data-signup>
-          <input name="machine_name" placeholder="machine name" autocomplete="off">
+          <label class="sr-only" for="signup-machine">Machine name</label>
+          <input id="signup-machine" name="machine_name" placeholder="machine name" autocomplete="off">
           <button>Create anonymous account</button>
         </form>
+        <p class="helper">No email required. You get an account number, account key, and machine token.</p>
         <div class="result" data-result hidden></div>
-        <div class="login">
-          <p class="muted">Already have an email on the account?</p>
-          <form data-login><input name="email" placeholder="email for magic link" autocomplete="email"><button class="secondary">Send magic link</button></form>
-          <pre class="result" data-login-result hidden></pre>
         </div>
-        <div class="login">
-          <p class="muted">Anonymous account sign-in</p>
-          <form data-account-login><input name="account_number" placeholder="account number"><input name="account_key" placeholder="account key"><button class="secondary">Sign in</button></form>
-          <pre class="result" data-account-login-result hidden></pre>
-        </div>
+        <section class="preview">
+          <div class="preview-top">
+            <div><span>Public burn graph</span><strong>8.4B sample tokens</strong></div>
+          </div>
+          ${heatmap(sampleDays(), { fit: true, span: 182, subtitle: "Last 26 weeks" })}
+          <div class="steps">
+            <span>Create a profile</span>
+            <span>Run <code>pyro</code></span>
+            <span>Share the graph</span>
+          </div>
+        </section>
       </section>
-      <section class="preview">${heatmap(sampleDays(), { fit: true, subtitle: "365-day token burn preview" })}</section>
+      <section class="auth-panel">
+        <details>
+          <summary>Already have an account?</summary>
+          <div class="auth-grid">
+            <section>
+              <h2>Email sign-in</h2>
+              <p class="muted">Use a magic link if you attached an email.</p>
+              <form data-login><label class="sr-only" for="login-email">Email</label><input id="login-email" name="email" placeholder="email for magic link" autocomplete="email"><button class="secondary">Send magic link</button></form>
+          <pre class="result" data-login-result hidden></pre>
+            </section>
+            <section>
+              <h2>Anonymous sign-in</h2>
+              <p class="muted">Use the account number and key from signup.</p>
+              <form data-account-login><label class="sr-only" for="account-number">Account number</label><input id="account-number" name="account_number" placeholder="account number"><label class="sr-only" for="account-key">Account key</label><input id="account-key" name="account_key" placeholder="account key"><button class="secondary">Sign in</button></form>
+          <pre class="result" data-account-login-result hidden></pre>
+            </section>
+          </div>
+        </details>
+      </section>
     </main>
     <script>${signupScript()}</script>
   `);
@@ -465,74 +488,73 @@ async function appPage(request, env) {
   return layout("Burnfolio app", `
     <main class="dash">
       <header class="dash-head">
-        <div><p class="eyebrow">Dashboard</p><h1>${esc(profileRef)}</h1></div>
+        <div><p class="eyebrow">Dashboard</p><h1>${esc(account.handle || "Anonymous builder")}</h1><p class="muted">Account <code>${esc(account.account_number)}</code>${userInfo.email ? ` · ${esc(userInfo.email)}${userInfo.email_verified_at ? " verified" : " unverified"}` : ""}</p></div>
         <div class="actions"><a class="button secondary" href="/${esc(profileRef)}">Public profile</a><button class="secondary" data-logout>Log out</button></div>
       </header>
-      <section class="panel">
-        <h2>Connect a machine</h2>
-        <p class="muted">Create a token, then run <code>pyro --profile ${esc(profileRef)} --machine &lt;token&gt;</code>.</p>
-        <form data-machine><input name="name" placeholder="machine name"><button>Create token</button></form>
-        <div class="result" data-machine-result hidden></div>
-        <div class="list">${machines.results.map(machineRow).join("") || `<p class="muted">No machines yet.</p>`}</div>
-      </section>
-      <section class="panel">
-        <h2>Profile</h2>
-        <p class="muted">Account ${esc(account.account_number)}${userInfo.email ? ` · ${esc(userInfo.email)}${userInfo.email_verified_at ? " verified" : " unverified"}` : ""}</p>
-        <form data-handle><input name="handle" placeholder="claim username"><button>Save username</button></form>
-        <form data-email><input name="email" placeholder="optional email for magic links" autocomplete="email"><button class="secondary">Add email</button></form>
-        <pre class="result" data-email-result hidden></pre>
-      </section>
-      <section class="panel">
-        <h2>Organizations</h2>
-        <form data-org><input name="handle" placeholder="org username, e.g. nbitslabs"><input name="name" placeholder="display name"><button>Create org</button></form>
-        <pre class="result" data-org-result hidden></pre>
-        <div class="list">${orgs.results.map(orgRow).join("") || `<p class="muted">No organizations yet.</p>`}</div>
-      </section>
+      <div class="dash-grid">
+        <section class="panel primary-panel">
+          <div class="section-head"><div><h2>Connect a machine</h2><p class="muted">Create a token, then run the generated command locally.</p></div></div>
+          <form class="form-row" data-machine><label class="sr-only" for="machine-name">Machine name</label><input id="machine-name" name="name" placeholder="machine name, e.g. macbook-pro"><button>Create token</button></form>
+          <p class="command-preview"><code>pyro --profile ${esc(profileRef)} --machine &lt;token&gt;</code></p>
+          <div class="result" data-machine-result hidden></div>
+          <div class="list">${machines.results.map(machineRow).join("") || emptyState("No machines connected", "Create a token and sync with pyro to start filling your burn graph.")}</div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><h2>Profile</h2><p class="muted">Claim a readable username and attach an email for recovery.</p></div></div>
+          <form class="form-stack" data-handle><label for="profile-handle">Username</label><div class="form-row"><input id="profile-handle" name="handle" placeholder="claim username"><button>Save</button></div></form>
+          <form class="form-stack" data-email><label for="profile-email">Email</label><div class="form-row"><input id="profile-email" name="email" placeholder="optional email for magic links" autocomplete="email"><button class="secondary">Add email</button></div></form>
+          <pre class="result" data-email-result hidden></pre>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><h2>Organizations</h2><p class="muted">Create org profiles and aggregate member token burn.</p></div></div>
+          <form class="form-stack" data-org><label for="org-handle">New organization</label><div class="form-row"><input id="org-handle" name="handle" placeholder="org username"><input name="name" placeholder="display name"><button>Create</button></div></form>
+          <pre class="result" data-org-result hidden></pre>
+          <div class="list">${orgs.results.map(orgRow).join("") || emptyState("No organizations yet", "Create an org when you want a shared burn graph for a team.")}</div>
+        </section>
+      </div>
     </main>
     <script>${dashboardScript(profileRef)}</script>
   `);
 }
 
 function machineRow(machine) {
-  return `<div class="row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)}${machine.last_seen_at ? ` · seen ${esc(machine.last_seen_at.slice(0, 10))}` : ""}</span></div></div>`;
+  return `<div class="row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div></div>`;
 }
 
 function orgRow(org) {
   const ref = org.handle || org.account_number;
-  const adminForm = org.role === "admin" ? `<form data-add-member data-org="${esc(ref)}"><input name="user" placeholder="user account or username"><select name="role"><option value="member">member</option><option value="admin">admin</option></select><button>Add</button></form>` : "";
+  const adminForm = org.role === "admin" ? `<form class="member-form" data-add-member data-org="${esc(ref)}"><label class="sr-only" for="member-${esc(ref)}">User account or username</label><input id="member-${esc(ref)}" name="user" placeholder="user account or username"><select name="role"><option value="member">member</option><option value="admin">admin</option></select><button>Add</button></form>` : "";
   return `<div class="row"><div><strong><a href="/${esc(ref)}">${esc(ref)}</a></strong><span>${esc(org.display_name || "Organization")} · ${esc(org.role)}</span></div>${adminForm}</div>`;
 }
 
 function profileHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
+  const displayName = profile.account.handle ? profile.account.handle : profile.account.kind === "org" ? (profile.account.display_name || profile.account.account_number) : "Anonymous builder";
   const stats = profile.stats;
   const scriptSnippet = `<script src="https://burnfolio.ai/embed/${name}/script.js"></script>`;
   const svgSnippet = `<img src="https://burnfolio.ai/embed/${name}.svg" alt="Burnfolio token burn graph">`;
   const markdownSnippet = `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg)](https://burnfolio.ai/${name})`;
-  const identity = [
-    `${profile.account.kind} profile`,
-    `account ${profile.account.account_number}`,
-    profile.account.display_name && profile.account.display_name !== name ? profile.account.display_name : "",
-  ].filter(Boolean).join(" · ");
+  const profileURL = `https://burnfolio.ai/${name}`;
   return layout(`${name} on Burnfolio`, `
     <main class="profile">
       <header class="profile-head">
         <div>
-          <p class="eyebrow">${esc(identity)}</p>
-          <h1>${esc(name)}</h1>
+          <div class="badges"><span>${esc(profile.account.kind)} profile</span><span>${esc(profile.account.account_number)}</span>${profile.account.display_name && profile.account.display_name !== displayName ? `<span>${esc(profile.account.display_name)}</span>` : ""}</div>
+          <h1>${esc(displayName)}</h1>
           <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active UTC days</p>
         </div>
-        <div class="actions"><a class="button secondary" href="${profile.embed_url}">Embed</a></div>
+        <div class="actions"><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button><button class="secondary" data-copy="${esc(markdownSnippet)}">Copy Markdown</button><a class="button secondary" href="${profile.embed_url}">Embed</a></div>
       </header>
       <section class="stats">
-        ${statCard("Total burn", formatInt(profile.total_tokens))}
+        ${statCard("Total burn", formatCompact(profile.total_tokens), `${formatInt(profile.total_tokens)} exact`)}
         ${statCard("Active days", formatInt(stats.active_days))}
-        ${statCard("Best day", formatInt(stats.best_day_tokens), stats.best_day || "No activity yet")}
+        ${statCard("Best day", formatCompact(stats.best_day_tokens), stats.best_day ? formatDate(stats.best_day) : "No activity yet")}
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
       </section>
-      ${heatmapTimeline(profile.days, { title: "Token burn timeline", subtitle: `${formatInt(stats.last_365_tokens)} tokens in the last 365 days` })}
+      ${heatmap(profile.days, { title: "Last 365 days", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
+      ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "UTC days, grouped by calendar year" })}
       <section class="panel">
-        <h2>Embed</h2>
+        <div class="section-head"><div><h2>Embed this graph</h2><p class="muted">Use the Markdown snippet for GitHub READMEs and profile pages.</p></div></div>
         <div class="snippets">
           ${snippet("Iframe script", scriptSnippet)}
           ${snippet("Static SVG", svgSnippet)}
@@ -593,7 +615,7 @@ function layout(title, body) {
 }
 
 function heatmap(days, options = {}) {
-  const cells = heatmapCellData(days).map((cell) => heatmapCell(cell));
+  const cells = heatmapCellData(days, options.span || 365).map((cell) => heatmapCell(cell));
   const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
   return `<section class="${classes}">
     ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
@@ -601,11 +623,11 @@ function heatmap(days, options = {}) {
   </section>`;
 }
 
-function heatmapCellData(days) {
+function heatmapCellData(days, span = 365) {
   const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
   const today = new Date();
   const cells = [];
-  for (let i = 364; i >= 0; i--) {
+  for (let i = span - 1; i >= 0; i--) {
     const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
     const date = d.toISOString().slice(0, 10);
     const value = byDate.get(date) || 0;
@@ -674,6 +696,30 @@ function statCard(label, value, detail = "") {
 
 function snippet(label, code) {
   return `<div class="snippet"><div><span>${esc(label)}</span><button type="button" class="secondary copy" data-copy="${esc(code)}">Copy</button></div><code>${esc(code)}</code></div>`;
+}
+
+function emptyState(title, body) {
+  return `<div class="empty-state"><strong>${esc(title)}</strong><span>${esc(body)}</span></div>`;
+}
+
+function formatDate(value) {
+  if (!value) return "";
+  const d = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+function formatCompact(value) {
+  const n = Number(value || 0);
+  if (n >= 1000000000000) return `${trimNumber(n / 1000000000000)}T`;
+  if (n >= 1000000000) return `${trimNumber(n / 1000000000)}B`;
+  if (n >= 1000000) return `${trimNumber(n / 1000000)}M`;
+  if (n >= 1000) return `${trimNumber(n / 1000)}K`;
+  return formatInt(n);
+}
+
+function trimNumber(value) {
+  return value >= 100 ? value.toFixed(0) : value >= 10 ? value.toFixed(1).replace(/\.0$/, "") : value.toFixed(2).replace(/0$/, "").replace(/\.0$/, "");
 }
 
 function profileStats(days, total) {
@@ -771,6 +817,16 @@ function signupScript() {
       box.append(heading, grid, note, app);
       target.appendChild(box);
     }
+    function messageFor(data) {
+      const messages = {
+        invalid_email: "Enter a valid email address.",
+        email_send_failed: "The email could not be sent. Try again shortly.",
+        missing_account_credentials: "Enter both the account number and account key.",
+        invalid_account_credentials: "The account number or account key is incorrect.",
+        handle_unavailable: "That username is already taken."
+      };
+      return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
+    }
     document.querySelector("[data-signup]").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -780,7 +836,7 @@ function signupScript() {
       const data = await res.json();
       if (!res.ok) {
         result.hidden = false;
-        result.textContent = JSON.stringify(data, null, 2);
+        result.textContent = messageFor(data);
         return;
       }
       const profile = data.account.handle || data.account.account_number;
@@ -800,7 +856,7 @@ function signupScript() {
       const res = await fetch("/api/magic-links", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
       result.hidden = false;
-      result.textContent = res.ok ? "Magic link sent. Check your email." : JSON.stringify(data, null, 2);
+      result.textContent = res.ok ? "Magic link sent. Check your email." : messageFor(data);
     });
     document.querySelector("[data-account-login]").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -810,7 +866,7 @@ function signupScript() {
       const res = await fetch("/api/account-login", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
       result.hidden = false;
-      result.textContent = res.ok ? "Signed in. Opening dashboard..." : JSON.stringify(data, null, 2);
+      result.textContent = res.ok ? "Signed in. Opening dashboard..." : messageFor(data);
       if (res.ok) location.href = "/app";
     });
   `;
@@ -855,16 +911,32 @@ function dashboardScript(profileRef) {
       box.append(heading, secretRow("Machine token", token), secretRow("Sync command", command));
       target.appendChild(box);
     }
+    function messageFor(data) {
+      const messages = {
+        unauthorized: "Your session expired. Sign in again.",
+        invalid_handle: "Choose a username with 3-32 letters, numbers, underscores, or hyphens.",
+        handle_unavailable: "That username is already taken.",
+        invalid_email: "Enter a valid email address.",
+        email_already_claimed: "That email is already attached to another account.",
+        email_send_failed: "The email could not be sent. Try again shortly.",
+        org_handle_unavailable: "That organization username is already taken.",
+        org_not_found: "Organization not found.",
+        forbidden: "Only org admins can add members.",
+        user_not_found: "No user was found for that account or username."
+      };
+      return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
+    }
     async function post(form, url) {
       const body = Object.fromEntries(new FormData(form).entries());
       const res = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
-      return res.json();
+      const data = await res.json();
+      return { ok: res.ok, data };
     }
-    document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); data.machine ? machineResult(out, data.machine.token) : (out.hidden = false, out.textContent = JSON.stringify(data, null, 2)); });
-    document.querySelector("[data-handle]").addEventListener("submit", async e => { e.preventDefault(); await post(e.currentTarget, "/api/handles"); location.reload(); });
-    document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = data.ok ? "Verification link sent. Check your email." : JSON.stringify(data, null, 2); });
-    document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); data.org ? location.reload() : (out.hidden = false, out.textContent = JSON.stringify(data, null, 2)); });
-    document.querySelectorAll("[data-add-member]").forEach(form => form.addEventListener("submit", async e => { e.preventDefault(); await post(e.currentTarget, "/api/orgs/" + e.currentTarget.dataset.org + "/members"); location.reload(); }));
+    document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); ok && data.machine ? machineResult(out, data.machine.token) : (out.hidden = false, out.textContent = messageFor(data)); });
+    document.querySelector("[data-handle]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/handles"); ok ? location.reload() : alert(messageFor(data)); });
+    document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = ok ? "Verification link sent. Check your email." : messageFor(data); });
+    document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); ok && data.org ? location.reload() : (out.hidden = false, out.textContent = messageFor(data)); });
+    document.querySelectorAll("[data-add-member]").forEach(form => form.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs/" + e.currentTarget.dataset.org + "/members"); ok ? location.reload() : alert(messageFor(data)); }));
     document.querySelector("[data-logout]").addEventListener("click", async () => { await fetch("/api/logout", { method:"POST" }); location.href = "/"; });
   `;
 }
