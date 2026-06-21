@@ -44,3 +44,21 @@ provider totals plus the same date/CLI/model segments for the future server API.
 When `-profile` and `-machine` are provided, the CLI uploads all local history to
 Burnfolio as one idempotent total per UTC day. Re-running the same command
 replaces each machine/day row instead of double-counting it.
+
+Anonymous signup returns an account number, account key, and machine token. Save
+the account key: it is the private credential used with the public account
+number to sign back in before adding an email or username.
+
+## Live Smoke Test
+
+The smoke test creates throwaway timestamped accounts on the configured server
+and verifies anonymous login, CLI sync, dedupe, multi-machine aggregation, org
+rollup, and embed output.
+
+```sh
+scripts/smoke-live.sh
+```
+
+By default it uses `https://burnfolio.ai` and the `pi` collector to keep the
+test lightweight. Override with `BURNFOLIO_SERVER` or
+`BURNFOLIO_SMOKE_PROVIDERS` when needed.
