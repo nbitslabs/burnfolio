@@ -11,6 +11,7 @@ COOKIE="${TMPDIR}/burnfolio-smoke-${STAMP}.cookies"
 SIGNUP="${TMPDIR}/burnfolio-smoke-${STAMP}.signup.json"
 MACHINE2="${TMPDIR}/burnfolio-smoke-${STAMP}.machine2.json"
 LOGIN="${TMPDIR}/burnfolio-smoke-${STAMP}.login.json"
+EMBED_DEMO="${TMPDIR}/burnfolio-smoke-${STAMP}.embed.html"
 
 if [ ! -x ./bin/pyro ]; then
   make build >/dev/null
@@ -95,6 +96,11 @@ case "${SVG_BODY}" in
   *"<svg"*) ;;
   *) echo "svg embed did not include svg root" >&2; exit 1 ;;
 esac
+
+sed -e "s|BURNFOLIO_ORIGIN|${BASE}|g" -e "s|YOUR_PROFILE|${ORG}|g" \
+  examples/embed.html >"${EMBED_DEMO}"
+grep -q "${BASE}/embed/${ORG}/script.js" "${EMBED_DEMO}"
+grep -q "${BASE}/embed/${ORG}.svg" "${EMBED_DEMO}"
 
 cat <<EOF
 ok=true

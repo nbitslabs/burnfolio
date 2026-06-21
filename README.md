@@ -35,7 +35,7 @@ Useful flags:
 pyro --providers claude,codex
 pyro --json
 pyro --home /path/to/home
-pyro --profile bf_ab12cd34 -machine bfm_...
+pyro --profile bf_ab12cd34 --machine bfm_...
 ```
 
 The table output is grouped by UTC date, CLI, and model. JSON output includes
@@ -83,3 +83,5 @@ Profiles expose both iframe and SVG embeds:
 <script src="https://burnfolio.ai/embed/<profile>/script.js"></script>
 <img src="https://burnfolio.ai/embed/<profile>.svg" alt="Burnfolio token burn graph">
 ```
+
+See `examples/embed.html` for a complete third-party page template.
