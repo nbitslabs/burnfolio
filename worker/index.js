@@ -288,7 +288,7 @@ async function embedSVGPage(env, ref) {
 
 function embedScript(request, ref) {
   const origin = new URL(request.url).origin;
-  return new Response(`document.currentScript.insertAdjacentHTML("afterend", '<iframe src="${origin}/embed/${escapeJS(ref)}" title="Burnfolio token burn" style="width:100%;max-width:760px;height:220px;border:0;border-radius:10px;overflow:hidden"></iframe>');`, {
+  return new Response(`document.currentScript.insertAdjacentHTML("afterend", '<iframe src="${origin}/embed/${escapeJS(encodeURIComponent(ref))}" title="Burnfolio token burn" style="width:100%;max-width:760px;height:220px;border:0;border-radius:8px;overflow:hidden"></iframe>');`, {
     headers: { "Content-Type": "application/javascript; charset=utf-8" },
   });
 }
@@ -421,11 +421,10 @@ function homePage() {
         <h1>Show your AI work like a contribution graph.</h1>
         <p class="lede">Burnfolio turns local Claude, Codex, OpenCode, and Pi usage into a public token-burn profile for you, your machines, and your orgs.</p>
         <form class="signup" method="post" action="/api/signup" data-signup>
-          <input name="username" placeholder="optional username" autocomplete="username">
-          <input name="email" placeholder="optional email" autocomplete="email">
+          <input name="machine_name" placeholder="machine name" autocomplete="off">
           <button>Create anonymous account</button>
         </form>
-        <pre class="result" data-result hidden></pre>
+        <div class="result" data-result hidden></div>
         <div class="login">
           <p class="muted">Already have an email on the account?</p>
           <form data-login><input name="email" placeholder="email for magic link" autocomplete="email"><button class="secondary">Send magic link</button></form>
@@ -468,7 +467,7 @@ async function appPage(request, env) {
         <h2>Connect a machine</h2>
         <p class="muted">Create a token, then run <code>pyro --profile ${esc(profileRef)} --machine &lt;token&gt;</code>.</p>
         <form data-machine><input name="name" placeholder="machine name"><button>Create token</button></form>
-        <pre class="result" data-machine-result hidden></pre>
+        <div class="result" data-machine-result hidden></div>
         <div class="list">${machines.results.map(machineRow).join("") || `<p class="muted">No machines yet.</p>`}</div>
       </section>
       <section class="panel">
@@ -485,7 +484,7 @@ async function appPage(request, env) {
         <div class="list">${orgs.results.map(orgRow).join("") || `<p class="muted">No organizations yet.</p>`}</div>
       </section>
     </main>
-    <script>${dashboardScript()}</script>
+    <script>${dashboardScript(profileRef)}</script>
   `);
 }
 
@@ -549,8 +548,8 @@ function svgEmbed(profile) {
   const width = left * 2 + 53 * (cellSize + gap);
   const height = 184;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(name)} Burnfolio token burn graph">
-  <rect width="100%" height="100%" rx="10" fill="#0b0c0f"/>
-  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="10" fill="none" stroke="#222a24"/>
+  <rect width="100%" height="100%" rx="8" fill="#0b0c0f"/>
+  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#222a24"/>
   <text x="22" y="30" fill="#edf1f7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
   <text x="22" y="50" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active UTC days</text>
   ${rects}
@@ -649,14 +648,15 @@ function level(value) {
 function css() {
   return `
     :root{color-scheme:dark;background:#0b0c0f;color:#edf1f7;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#162117,#0b0c0f 44%);min-height:100vh}
+    *{box-sizing:border-box}body{margin:0;background:#0b0c0f;min-height:100vh}
     nav{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid #242932;background:rgba(11,12,15,.82);backdrop-filter:blur(14px);position:sticky;top:0}
     a{color:#dff6a0;text-decoration:none}button,.button{border:0;border-radius:8px;background:#d7ff70;color:#11160c;padding:11px 14px;font-weight:700;cursor:pointer;display:inline-flex}.secondary{background:#222a24;color:#dff6a0;border:1px solid #354231}
     input,select{border:1px solid #343b45;background:#11151b;color:#f5f7fb;border-radius:8px;padding:11px 12px;min-width:0}code,pre{background:#11151b;border:1px solid #262d37;border-radius:8px;padding:10px;overflow:auto}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-    .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:48px;align-items:center;max-width:1180px;margin:0 auto;padding:72px 28px}.eyebrow{color:#9caf88;text-transform:uppercase;letter-spacing:.08em;font-size:12px;font-weight:800}.hero h1{font-size:58px;line-height:1.02;margin:10px 0 18px;letter-spacing:0}.lede{font-size:19px;color:#bcc7d4;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}.login{margin-top:28px}
+    .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:48px;align-items:center;max-width:1180px;margin:0 auto;padding:72px 28px}.eyebrow{color:#9caf88;text-transform:uppercase;letter-spacing:0;font-size:12px;font-weight:800}.hero h1{font-size:58px;line-height:1.02;margin:10px 0 18px;letter-spacing:0}.lede{font-size:19px;color:#bcc7d4;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}.login{margin-top:28px}
+    .setup{display:grid;gap:12px;margin-top:18px;padding:16px;border:1px solid #293321;background:#101511;border-radius:8px;white-space:normal}.setup h2{font-size:18px;margin:0}.setup p{margin:0;color:#aab4c1}.secret-grid{display:grid;gap:10px}.secret{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:10px}.secret span{display:block;color:#9faab8;font-size:12px;text-transform:uppercase;font-weight:800}.secret code{display:block;margin-top:5px;padding:0;border:0;background:transparent;color:#edf1f7;white-space:normal;overflow-wrap:anywhere}.copy{padding:9px 11px}
     .preview{padding:28px;border:1px solid #26301f;background:#101511;border-radius:8px}.profile,.dash{max-width:1050px;margin:0 auto;padding:46px 28px}.profile-head,.dash-head{display:flex;justify-content:space-between;gap:22px;align-items:flex-start}.profile h1,.dash h1{font-size:44px;margin:0}.profile-head p{color:#bcc7d4}.panel{margin-top:24px;padding:22px 0;border-top:1px solid #252b34}.panel h2{margin:0 0 12px;font-size:20px}.muted{color:#aab4c1}
     .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:30px 0}.stats div{border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:14px}.stats span{display:block;color:#9faab8;font-size:12px;text-transform:uppercase;font-weight:800}.stats strong{display:block;font-size:25px;margin-top:6px}.stats em{display:block;color:#9faab8;font-style:normal;font-size:12px;margin-top:4px}
-    .graph{border:1px solid #26301f;background:#101511;border-radius:8px;padding:18px 18px 8px;margin-top:22px}.graph.compact{border:0;background:transparent;padding:8px 0 0;margin-top:8px}.graph-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.graph-head h2{font-size:19px;margin:0}.graph-head p{margin:5px 0 0;color:#9faab8}.graph-head.small{align-items:center}.legend{display:flex;align-items:center;gap:5px;color:#9faab8;font-size:12px;white-space:nowrap}.heatmap{display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:4px;overflow:auto;padding:18px 0}.cell{width:12px;height:12px;border-radius:3px;background:#1c232b;display:inline-block}.l1{background:#24462e}.l2{background:#3f7d3c}.l3{background:#82bd45}.l4{background:#d7ff70}.embed{padding:14px;background:#0b0c0f;border:1px solid #222a24;border-radius:10px}.embed>div:first-child{display:flex;justify-content:space-between;color:#edf1f7}
+    .graph{border:1px solid #26301f;background:#101511;border-radius:8px;padding:18px 18px 8px;margin-top:22px}.graph.compact{border:0;background:transparent;padding:8px 0 0;margin-top:8px}.graph-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.graph-head h2{font-size:19px;margin:0}.graph-head p{margin:5px 0 0;color:#9faab8}.graph-head.small{align-items:center}.legend{display:flex;align-items:center;gap:5px;color:#9faab8;font-size:12px;white-space:nowrap}.heatmap{display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:4px;overflow:auto;padding:18px 0}.cell{width:12px;height:12px;border-radius:3px;background:#1c232b;display:inline-block}.l1{background:#24462e}.l2{background:#3f7d3c}.l3{background:#82bd45}.l4{background:#d7ff70}.embed{padding:14px;background:#0b0c0f;border:1px solid #222a24;border-radius:8px}.embed>div:first-child{display:flex;justify-content:space-between;color:#edf1f7}
     .list{display:grid;gap:10px;margin-top:16px}.row{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:12px}.row span{display:block;color:#9faab8;font-size:13px;margin-top:3px}.row form{justify-content:flex-end}
     @media(max-width:820px){.hero{grid-template-columns:1fr;padding-top:42px}.hero h1{font-size:42px}nav{padding:0 18px}.profile-head,.dash-head{display:block}.signup input,form input{width:100%}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.graph-head{display:block}.legend{margin-top:12px}}
   `;
@@ -664,6 +664,50 @@ function css() {
 
 function signupScript() {
   return `
+    function secretRow(label, value) {
+      const row = document.createElement("div");
+      row.className = "secret";
+      const wrap = document.createElement("div");
+      const name = document.createElement("span");
+      name.textContent = label;
+      const code = document.createElement("code");
+      code.textContent = value;
+      wrap.append(name, code);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary copy";
+      button.textContent = "Copy";
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          button.textContent = "Copied";
+        } catch {
+          button.textContent = "Select";
+        }
+        setTimeout(() => button.textContent = "Copy", 1200);
+      });
+      row.append(wrap, button);
+      return row;
+    }
+    function setupResult(target, items, footer) {
+      target.hidden = false;
+      target.innerHTML = "";
+      const box = document.createElement("section");
+      box.className = "setup";
+      const heading = document.createElement("h2");
+      heading.textContent = "Account created";
+      const grid = document.createElement("div");
+      grid.className = "secret-grid";
+      for (const item of items) grid.appendChild(secretRow(item.label, item.value));
+      const note = document.createElement("p");
+      note.textContent = footer;
+      const app = document.createElement("a");
+      app.className = "button secondary";
+      app.href = "/app";
+      app.textContent = "Open dashboard";
+      box.append(heading, grid, note, app);
+      target.appendChild(box);
+    }
     document.querySelector("[data-signup]").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -671,8 +715,19 @@ function signupScript() {
       const body = Object.fromEntries(new FormData(form).entries());
       const res = await fetch("/api/signup", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
-      result.hidden = false;
-      result.textContent = res.ok ? "Account: " + data.account.account_number + (data.account.handle ? " / " + data.account.handle : "") + "\\nAccount key: " + data.account_key + "\\nMachine token: " + data.machine.token + "\\n\\nRun: pyro --profile " + (data.account.handle || data.account.account_number) + " --machine " + data.machine.token + "\\n\\nSave the account key before closing this page. Open /app when you have saved it." : JSON.stringify(data, null, 2);
+      if (!res.ok) {
+        result.hidden = false;
+        result.textContent = JSON.stringify(data, null, 2);
+        return;
+      }
+      const profile = data.account.handle || data.account.account_number;
+      const command = "pyro --profile " + profile + " --machine " + data.machine.token;
+      setupResult(result, [
+        { label: "Account number", value: data.account.account_number },
+        { label: "Account key", value: data.account_key },
+        { label: "Machine token", value: data.machine.token },
+        { label: "Sync command", value: command }
+      ], "Save the account key now. It is the private credential for anonymous sign-in.");
     });
     document.querySelector("[data-login]").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -698,14 +753,51 @@ function signupScript() {
   `;
 }
 
-function dashboardScript() {
+function dashboardScript(profileRef) {
   return `
+    const profileRef = ${JSON.stringify(profileRef)};
+    function secretRow(label, value) {
+      const row = document.createElement("div");
+      row.className = "secret";
+      const wrap = document.createElement("div");
+      const name = document.createElement("span");
+      name.textContent = label;
+      const code = document.createElement("code");
+      code.textContent = value;
+      wrap.append(name, code);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary copy";
+      button.textContent = "Copy";
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          button.textContent = "Copied";
+        } catch {
+          button.textContent = "Select";
+        }
+        setTimeout(() => button.textContent = "Copy", 1200);
+      });
+      row.append(wrap, button);
+      return row;
+    }
+    function machineResult(target, token) {
+      target.hidden = false;
+      target.innerHTML = "";
+      const box = document.createElement("section");
+      box.className = "setup";
+      const heading = document.createElement("h2");
+      heading.textContent = "Machine token created";
+      const command = "pyro --profile " + profileRef + " --machine " + token;
+      box.append(heading, secretRow("Machine token", token), secretRow("Sync command", command));
+      target.appendChild(box);
+    }
     async function post(form, url) {
       const body = Object.fromEntries(new FormData(form).entries());
       const res = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       return res.json();
     }
-    document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); out.hidden = false; out.textContent = "Machine token: " + data.machine.token; });
+    document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); data.machine ? machineResult(out, data.machine.token) : (out.hidden = false, out.textContent = JSON.stringify(data, null, 2)); });
     document.querySelector("[data-handle]").addEventListener("submit", async e => { e.preventDefault(); await post(e.currentTarget, "/api/handles"); location.reload(); });
     document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = data.ok ? "Verification link sent. Check your email." : JSON.stringify(data, null, 2); });
     document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); out.hidden = false; out.textContent = JSON.stringify(data, null, 2); });
