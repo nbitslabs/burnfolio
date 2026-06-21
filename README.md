@@ -32,22 +32,36 @@ pyro
 Useful flags:
 
 ```sh
-pyro -providers claude,codex
-pyro -json
-pyro -home /path/to/home
-pyro -profile bf_ab12cd34 -machine bfm_...
+pyro --providers claude,codex
+pyro --json
+pyro --home /path/to/home
+pyro --profile bf_ab12cd34 -machine bfm_...
 ```
 
 The table output is grouped by UTC date, CLI, and model. JSON output includes
 provider totals plus the same date/CLI/model segments for the future server API.
 
-When `-profile` and `-machine` are provided, the CLI uploads all local history to
+When `--profile` and `--machine` are provided, the CLI uploads all local history to
 Burnfolio as one idempotent total per UTC day. Re-running the same command
 replaces each machine/day row instead of double-counting it.
 
-Anonymous signup returns an account number, account key, and machine token. Save
-the account key: it is the private credential used with the public account
-number to sign back in before adding an email or username.
+## Hosted Flow
+
+Create an anonymous account at `https://burnfolio.ai`. Signup returns an account
+number, account key, machine token, and a ready-to-run sync command. Save the
+account key: it is the private credential used with the public account number to
+sign back in before adding an email or username.
+
+Run the generated command locally:
+
+```sh
+pyro --profile <account-number-or-username> --machine <machine-token>
+```
+
+From the dashboard you can claim a username, attach an optional email for magic
+links, create more machine tokens, create the `nbitslabs` org, and add users as
+members or admins. Public user and org pages expose the same burn graph plus
+iframe and SVG embed snippets.
 
 ## Live Smoke Test
 
