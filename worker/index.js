@@ -441,7 +441,7 @@ function homePage() {
           <pre class="result" data-account-login-result hidden></pre>
         </div>
       </section>
-      <section class="preview">${heatmap(sampleDays())}</section>
+      <section class="preview">${heatmap(sampleDays(), { fit: true, subtitle: "365-day token burn preview" })}</section>
     </main>
     <script>${signupScript()}</script>
   `);
@@ -508,6 +508,7 @@ function profileHtml(profile) {
   const stats = profile.stats;
   const scriptSnippet = `<script src="https://burnfolio.ai/embed/${name}/script.js"></script>`;
   const svgSnippet = `<img src="https://burnfolio.ai/embed/${name}.svg" alt="Burnfolio token burn graph">`;
+  const markdownSnippet = `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg)](https://burnfolio.ai/${name})`;
   const identity = [
     `${profile.account.kind} profile`,
     `account ${profile.account.account_number}`,
@@ -535,6 +536,7 @@ function profileHtml(profile) {
         <div class="snippets">
           ${snippet("Iframe script", scriptSnippet)}
           ${snippet("Static SVG", svgSnippet)}
+          ${snippet("GitHub Markdown", markdownSnippet)}
         </div>
       </section>
     </main>
@@ -553,7 +555,7 @@ function svgEmbed(profile) {
   const gap = 4;
   const left = 22;
   const top = 62;
-  const colors = ["#1c232b", "#24462e", "#3f7d3c", "#82bd45", "#d7ff70"];
+  const colors = ["#1b2533", "#214936", "#3f8f48", "#9bd64b", "#d8ff63"];
   const rects = cells.map((cell, i) => {
     const x = left + Math.floor(i / 7) * (cellSize + gap);
     const y = top + (i % 7) * (cellSize + gap);
@@ -563,7 +565,7 @@ function svgEmbed(profile) {
   const height = 184;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(name)} Burnfolio token burn graph">
   <rect width="100%" height="100%" rx="8" fill="#0b0c0f"/>
-  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#222a24"/>
+  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#263241"/>
   <text x="22" y="30" fill="#edf1f7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
   <text x="22" y="50" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active UTC days</text>
   ${rects}
@@ -574,6 +576,7 @@ function svgEmbed(profile) {
   <rect x="100" y="155" width="10" height="10" rx="2" fill="${colors[3]}"/>
   <rect x="115" y="155" width="10" height="10" rx="2" fill="${colors[4]}"/>
   <text x="132" y="164" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
+  <text x="${width - 22}" y="164" text-anchor="end" fill="#d8ff63" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700">burnfolio.ai</text>
 </svg>`;
 }
 
@@ -591,7 +594,8 @@ function layout(title, body) {
 
 function heatmap(days, options = {}) {
   const cells = heatmapCellData(days).map((cell) => heatmapCell(cell));
-  return `<section class="${options.compact ? "graph compact" : "graph"}">
+  const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
+  return `<section class="${classes}">
     ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
     <div class="heatmap-scroll"><div class="heatmap" aria-label="Token burn by UTC day">${cells.join("")}</div></div>
   </section>`;
@@ -866,10 +870,18 @@ function dashboardScript(profileRef) {
 }
 
 function sampleDays() {
-  return Array.from({ length: 180 }, (_, i) => {
-    const d = new Date(Date.UTC(2026, 0, 1 + i));
-    return { date_utc: d.toISOString().slice(0, 10), total_tokens: Math.floor(Math.pow((i * 7919) % 97, 3) * 1500) };
-  });
+  const today = new Date();
+  const days = [];
+  for (let i = 364; i >= 0; i--) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+    const weekday = d.getUTCDay();
+    const pulse = ((i * 37) + (weekday * 19)) % 101;
+    const isWorkingDay = weekday > 0 && weekday < 6;
+    const active = isWorkingDay ? pulse > 17 : pulse > 72;
+    const total = active ? Math.round((pulse ** 2.35) * 8200 + (weekday + 1) * 180000) : 0;
+    days.push({ date_utc: d.toISOString().slice(0, 10), total_tokens: total });
+  }
+  return days;
 }
 
 function globalScript() {
