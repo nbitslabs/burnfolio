@@ -30,6 +30,7 @@ async function route(request, env) {
   if (path.match(/^\/api\/orgs\/[^/]+\/members$/) && request.method === "POST") return addOrgMemberRoute(request, env, path.split("/")[3]);
   if (path === "/api/ingest" && request.method === "POST") return ingest(request, env);
   if (path.match(/^\/api\/profiles\/[^/]+\/stats$/)) return profileStatsRoute(env, decodeURIComponent(path.split("/")[3]));
+  if (path.match(/^\/embed\/[^/]+\.svg$/)) return embedSVGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/embed\/[^/]+$/)) return embedPage(env, decodeURIComponent(path.split("/")[2]));
   if (path.match(/^\/embed\/[^/]+\/script\.js$/)) return embedScript(request, decodeURIComponent(path.split("/")[2]));
   if (path.match(/^\/[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/)) return profilePage(env, path.slice(1));
@@ -274,6 +275,17 @@ async function embedPage(env, ref) {
   return html(embedHtml(profile));
 }
 
+async function embedSVGPage(env, ref) {
+  const profile = await buildProfile(env, ref);
+  if (!profile) return new Response("Not found", { status: 404 });
+  return new Response(svgEmbed(profile), {
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=300",
+    },
+  });
+}
+
 function embedScript(request, ref) {
   const origin = new URL(request.url).origin;
   return new Response(`document.currentScript.insertAdjacentHTML("afterend", '<iframe src="${origin}/embed/${escapeJS(ref)}" title="Burnfolio token burn" style="width:100%;max-width:760px;height:220px;border:0;border-radius:10px;overflow:hidden"></iframe>');`, {
@@ -510,6 +522,7 @@ function profileHtml(profile) {
       <section class="panel">
         <h2>Embed</h2>
         <code>&lt;script src="https://burnfolio.ai/embed/${esc(name)}/script.js"&gt;&lt;/script&gt;</code>
+        <code>&lt;img src="https://burnfolio.ai/embed/${esc(name)}.svg" alt="Burnfolio token burn graph"&gt;</code>
       </section>
     </main>
   `);
@@ -518,6 +531,37 @@ function profileHtml(profile) {
 function embedHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
   return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days` })}</div>`;
+}
+
+function svgEmbed(profile) {
+  const name = profile.account.handle || profile.account.account_number;
+  const cells = heatmapCellData(profile.days);
+  const cellSize = 10;
+  const gap = 4;
+  const left = 22;
+  const top = 62;
+  const colors = ["#1c232b", "#24462e", "#3f7d3c", "#82bd45", "#d7ff70"];
+  const rects = cells.map((cell, i) => {
+    const x = left + Math.floor(i / 7) * (cellSize + gap);
+    const y = top + (i % 7) * (cellSize + gap);
+    return `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="2" fill="${colors[cell.level]}"><title>${esc(cell.date)}: ${formatInt(cell.value)}</title></rect>`;
+  }).join("");
+  const width = left * 2 + 53 * (cellSize + gap);
+  const height = 184;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(name)} Burnfolio token burn graph">
+  <rect width="100%" height="100%" rx="10" fill="#0b0c0f"/>
+  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="10" fill="none" stroke="#222a24"/>
+  <text x="22" y="30" fill="#edf1f7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
+  <text x="22" y="50" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active UTC days</text>
+  ${rects}
+  <text x="22" y="164" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
+  <rect x="55" y="155" width="10" height="10" rx="2" fill="${colors[0]}"/>
+  <rect x="70" y="155" width="10" height="10" rx="2" fill="${colors[1]}"/>
+  <rect x="85" y="155" width="10" height="10" rx="2" fill="${colors[2]}"/>
+  <rect x="100" y="155" width="10" height="10" rx="2" fill="${colors[3]}"/>
+  <rect x="115" y="155" width="10" height="10" rx="2" fill="${colors[4]}"/>
+  <text x="132" y="164" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
+</svg>`;
 }
 
 function notFoundPage() {
@@ -533,19 +577,24 @@ function layout(title, body) {
 }
 
 function heatmap(days, options = {}) {
+  const cells = heatmapCellData(days).map((cell) => `<span title="${cell.date}: ${formatInt(cell.value)}" class="cell l${cell.level}"></span>`);
+  return `<section class="${options.compact ? "graph compact" : "graph"}">
+    ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
+    <div class="heatmap" aria-label="Token burn by UTC day">${cells.join("")}</div>
+  </section>`;
+}
+
+function heatmapCellData(days) {
   const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
   const today = new Date();
   const cells = [];
   for (let i = 364; i >= 0; i--) {
     const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
-    const key = d.toISOString().slice(0, 10);
-    const value = byDate.get(key) || 0;
-    cells.push(`<span title="${key}: ${formatInt(value)}" class="cell l${level(value)}"></span>`);
+    const date = d.toISOString().slice(0, 10);
+    const value = byDate.get(date) || 0;
+    cells.push({ date, value, level: level(value) });
   }
-  return `<section class="${options.compact ? "graph compact" : "graph"}">
-    ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
-    <div class="heatmap" aria-label="Token burn by UTC day">${cells.join("")}</div>
-  </section>`;
+  return cells;
 }
 
 function legend() {

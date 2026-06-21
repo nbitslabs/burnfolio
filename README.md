@@ -62,3 +62,10 @@ scripts/smoke-live.sh
 By default it uses `https://burnfolio.ai` and the `pi` collector to keep the
 test lightweight. Override with `BURNFOLIO_SERVER` or
 `BURNFOLIO_SMOKE_PROVIDERS` when needed.
+
+Profiles expose both iframe and SVG embeds:
+
+```html
+<script src="https://burnfolio.ai/embed/<profile>/script.js"></script>
+<img src="https://burnfolio.ai/embed/<profile>.svg" alt="Burnfolio token burn graph">
+```

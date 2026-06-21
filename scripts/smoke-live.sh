@@ -85,7 +85,16 @@ if [ "${ORG_TOTAL}" != "${TOTAL_TWO}" ]; then
   exit 1
 fi
 
-curl -fsS "${BASE}/embed/${ORG}/script.js" | grep -q "<iframe"
+SCRIPT_BODY="$(curl -fsS "${BASE}/embed/${ORG}/script.js")"
+SVG_BODY="$(curl -fsS "${BASE}/embed/${ORG}.svg")"
+case "${SCRIPT_BODY}" in
+  *"<iframe"*) ;;
+  *) echo "iframe embed script did not include iframe" >&2; exit 1 ;;
+esac
+case "${SVG_BODY}" in
+  *"<svg"*) ;;
+  *) echo "svg embed did not include svg root" >&2; exit 1 ;;
+esac
 
 cat <<EOF
 ok=true
