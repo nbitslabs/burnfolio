@@ -5,12 +5,16 @@ BASE="${BURNFOLIO_SERVER:-https://burnfolio.ai}"
 PROVIDERS="${BURNFOLIO_SMOKE_PROVIDERS:-pi}"
 STAMP="$(date +%s)"
 HANDLE="smoke${STAMP}"
+TAKEN_HANDLE="${HANDLE}taken"
 ORG="smokeorg${STAMP}"
 TMPDIR="${TMPDIR:-/tmp}"
 COOKIE="${TMPDIR}/burnfolio-smoke-${STAMP}.cookies"
+COOKIE2="${TMPDIR}/burnfolio-smoke-${STAMP}.second.cookies"
 SIGNUP="${TMPDIR}/burnfolio-smoke-${STAMP}.signup.json"
+SIGNUP2="${TMPDIR}/burnfolio-smoke-${STAMP}.signup2.json"
 MACHINE2="${TMPDIR}/burnfolio-smoke-${STAMP}.machine2.json"
 LOGIN="${TMPDIR}/burnfolio-smoke-${STAMP}.login.json"
+CONFLICT="${TMPDIR}/burnfolio-smoke-${STAMP}.conflict.json"
 EMBED_DEMO="${TMPDIR}/burnfolio-smoke-${STAMP}.embed.html"
 
 if [ ! -x ./bin/pyro ]; then
@@ -45,6 +49,22 @@ curl -fsS -c "${COOKIE}" \
   "${BASE}/api/account-login" >"${LOGIN}"
 
 jq -e --arg account "${ACCOUNT}" '.account.account_number == $account' "${LOGIN}" >/dev/null
+
+curl -fsS -c "${COOKIE2}" \
+  -H 'content-type: application/json' \
+  -d "{\"username\":\"${TAKEN_HANDLE}\",\"machine_name\":\"smoke taken\"}" \
+  "${BASE}/api/signup" >"${SIGNUP2}"
+
+CONFLICT_STATUS="$(curl -sS -o "${CONFLICT}" -w "%{http_code}" -b "${COOKIE}" \
+  -H 'content-type: application/json' \
+  -d "{\"handle\":\"${TAKEN_HANDLE}\"}" \
+  "${BASE}/api/handles")"
+if [ "${CONFLICT_STATUS}" != "409" ]; then
+  echo "handle conflict returned ${CONFLICT_STATUS}, want 409" >&2
+  cat "${CONFLICT}" >&2
+  exit 1
+fi
+curl -fsS "${BASE}/${HANDLE}" >/dev/null
 
 curl -fsS -b "${COOKIE}" \
   -H 'content-type: application/json' \

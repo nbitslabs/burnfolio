@@ -178,10 +178,11 @@ async function claimHandle(request, env) {
   const handle = cleanHandle(body.handle || body.username);
   if (!handle) return json({ error: "invalid_handle" }, 400);
   try {
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM handles WHERE account_id = ?").bind(user.id),
-      env.DB.prepare("INSERT INTO handles (handle, account_id) VALUES (?, ?)").bind(handle, user.id),
-    ]);
+    await env.DB.prepare(`
+      INSERT INTO handles (handle, account_id)
+      VALUES (?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET handle = excluded.handle
+    `).bind(handle, user.id).run();
   } catch {
     return json({ error: "handle_unavailable" }, 409);
   }
