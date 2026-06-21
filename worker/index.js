@@ -286,7 +286,7 @@ async function buildProfile(env, ref) {
   if (!account) return null;
   const days = account.kind === "org" ? await orgDays(env, account.id) : await userDays(env, account.id);
   const total = days.reduce((sum, day) => sum + day.total_tokens, 0);
-  return { account, days, total_tokens: total, embed_url: `/embed/${account.handle || account.account_number}` };
+  return { account, days, total_tokens: total, stats: profileStats(days, total), embed_url: `/embed/${account.handle || account.account_number}` };
 }
 
 async function userDays(env, userID) {
@@ -489,13 +489,24 @@ function orgRow(org) {
 
 function profileHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
+  const stats = profile.stats;
   return layout(`${name} on Burnfolio`, `
     <main class="profile">
       <header class="profile-head">
-        <div><p class="eyebrow">${profile.account.kind}</p><h1>${esc(name)}</h1><p>${formatInt(profile.total_tokens)} tokens burned</p></div>
-        <a class="button secondary" href="${profile.embed_url}">Embed</a>
+        <div>
+          <p class="eyebrow">${profile.account.kind} profile</p>
+          <h1>${esc(name)}</h1>
+          <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active UTC days</p>
+        </div>
+        <div class="actions"><a class="button secondary" href="${profile.embed_url}">Embed</a></div>
       </header>
-      ${heatmap(profile.days)}
+      <section class="stats">
+        <div><span>Total burn</span><strong>${formatInt(profile.total_tokens)}</strong></div>
+        <div><span>Active days</span><strong>${formatInt(stats.active_days)}</strong></div>
+        <div><span>Best day</span><strong>${formatInt(stats.best_day_tokens)}</strong><em>${esc(stats.best_day || "No activity yet")}</em></div>
+        <div><span>Current streak</span><strong>${formatInt(stats.current_streak_days)}</strong></div>
+      </section>
+      ${heatmap(profile.days, { title: "Token burn graph", subtitle: `${formatInt(stats.last_365_tokens)} tokens in the last 365 days` })}
       <section class="panel">
         <h2>Embed</h2>
         <code>&lt;script src="https://burnfolio.ai/embed/${esc(name)}/script.js"&gt;&lt;/script&gt;</code>
@@ -506,7 +517,7 @@ function profileHtml(profile) {
 
 function embedHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
-  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days)}</div>`;
+  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days` })}</div>`;
 }
 
 function notFoundPage() {
@@ -521,7 +532,7 @@ function layout(title, body) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${css()}</style></head><body><nav><a href="/">Burnfolio</a><a href="/app">App</a></nav>${body}</body></html>`;
 }
 
-function heatmap(days) {
+function heatmap(days, options = {}) {
   const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
   const today = new Date();
   const cells = [];
@@ -531,7 +542,51 @@ function heatmap(days) {
     const value = byDate.get(key) || 0;
     cells.push(`<span title="${key}: ${formatInt(value)}" class="cell l${level(value)}"></span>`);
   }
-  return `<div class="heatmap">${cells.join("")}</div>`;
+  return `<section class="${options.compact ? "graph compact" : "graph"}">
+    ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
+    <div class="heatmap" aria-label="Token burn by UTC day">${cells.join("")}</div>
+  </section>`;
+}
+
+function legend() {
+  return `<div class="legend"><span>Less</span><i class="cell l0"></i><i class="cell l1"></i><i class="cell l2"></i><i class="cell l3"></i><i class="cell l4"></i><span>More</span></div>`;
+}
+
+function profileStats(days, total) {
+  const activeDays = days.filter((day) => day.total_tokens > 0);
+  let bestDay = "";
+  let bestDayTokens = 0;
+  for (const day of activeDays) {
+    if (day.total_tokens > bestDayTokens) {
+      bestDay = day.date_utc;
+      bestDayTokens = day.total_tokens;
+    }
+  }
+
+  const dayMap = new Map(days.map((day) => [day.date_utc, day.total_tokens]));
+  const today = new Date();
+  let currentStreak = 0;
+  for (let i = 0; i < 365; i++) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+    const key = d.toISOString().slice(0, 10);
+    if ((dayMap.get(key) || 0) <= 0) break;
+    currentStreak++;
+  }
+
+  let last365Tokens = 0;
+  for (let i = 0; i < 365; i++) {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+    last365Tokens += dayMap.get(d.toISOString().slice(0, 10)) || 0;
+  }
+
+  return {
+    active_days: activeDays.length,
+    best_day: bestDay,
+    best_day_tokens: bestDayTokens,
+    current_streak_days: currentStreak,
+    average_active_day_tokens: activeDays.length ? Math.round(total / activeDays.length) : 0,
+    last_365_tokens: last365Tokens,
+  };
 }
 
 function level(value) {
@@ -551,9 +606,10 @@ function css() {
     input,select{border:1px solid #343b45;background:#11151b;color:#f5f7fb;border-radius:8px;padding:11px 12px;min-width:0}code,pre{background:#11151b;border:1px solid #262d37;border-radius:8px;padding:10px;overflow:auto}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:48px;align-items:center;max-width:1180px;margin:0 auto;padding:72px 28px}.eyebrow{color:#9caf88;text-transform:uppercase;letter-spacing:.08em;font-size:12px;font-weight:800}.hero h1{font-size:58px;line-height:1.02;margin:10px 0 18px;letter-spacing:0}.lede{font-size:19px;color:#bcc7d4;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}.login{margin-top:28px}
     .preview{padding:28px;border:1px solid #26301f;background:#101511;border-radius:8px}.profile,.dash{max-width:1050px;margin:0 auto;padding:46px 28px}.profile-head,.dash-head{display:flex;justify-content:space-between;gap:22px;align-items:flex-start}.profile h1,.dash h1{font-size:44px;margin:0}.profile-head p{color:#bcc7d4}.panel{margin-top:24px;padding:22px 0;border-top:1px solid #252b34}.panel h2{margin:0 0 12px;font-size:20px}.muted{color:#aab4c1}
-    .heatmap{display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:4px;overflow:auto;padding:18px 0}.cell{width:12px;height:12px;border-radius:3px;background:#1c232b}.l1{background:#24462e}.l2{background:#3f7d3c}.l3{background:#82bd45}.l4{background:#d7ff70}.embed{padding:14px;background:#0b0c0f;border:1px solid #222a24;border-radius:10px}.embed>div:first-child{display:flex;justify-content:space-between;color:#edf1f7}
+    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:30px 0}.stats div{border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:14px}.stats span{display:block;color:#9faab8;font-size:12px;text-transform:uppercase;font-weight:800}.stats strong{display:block;font-size:25px;margin-top:6px}.stats em{display:block;color:#9faab8;font-style:normal;font-size:12px;margin-top:4px}
+    .graph{border:1px solid #26301f;background:#101511;border-radius:8px;padding:18px 18px 8px;margin-top:22px}.graph.compact{border:0;background:transparent;padding:8px 0 0;margin-top:8px}.graph-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.graph-head h2{font-size:19px;margin:0}.graph-head p{margin:5px 0 0;color:#9faab8}.graph-head.small{align-items:center}.legend{display:flex;align-items:center;gap:5px;color:#9faab8;font-size:12px;white-space:nowrap}.heatmap{display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:4px;overflow:auto;padding:18px 0}.cell{width:12px;height:12px;border-radius:3px;background:#1c232b;display:inline-block}.l1{background:#24462e}.l2{background:#3f7d3c}.l3{background:#82bd45}.l4{background:#d7ff70}.embed{padding:14px;background:#0b0c0f;border:1px solid #222a24;border-radius:10px}.embed>div:first-child{display:flex;justify-content:space-between;color:#edf1f7}
     .list{display:grid;gap:10px;margin-top:16px}.row{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:12px}.row span{display:block;color:#9faab8;font-size:13px;margin-top:3px}.row form{justify-content:flex-end}
-    @media(max-width:820px){.hero{grid-template-columns:1fr;padding-top:42px}.hero h1{font-size:42px}nav{padding:0 18px}.profile-head,.dash-head{display:block}.signup input,form input{width:100%}}
+    @media(max-width:820px){.hero{grid-template-columns:1fr;padding-top:42px}.hero h1{font-size:42px}nav{padding:0 18px}.profile-head,.dash-head{display:block}.signup input,form input{width:100%}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.graph-head{display:block}.legend{margin-top:12px}}
   `;
 }
 
