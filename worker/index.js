@@ -18,8 +18,11 @@ async function route(request, env) {
   if (path === "/") return html(homePage());
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
+  if (path === "/api/account-login" && request.method === "POST") return accountLogin(request, env);
   if (path === "/api/magic-links" && request.method === "POST") return requestMagicLink(request, env);
   if (path === "/auth/magic") return consumeMagicLink(request, env);
+  if (path === "/api/email" && request.method === "POST") return attachEmail(request, env);
+  if (path === "/api/logout" && request.method === "POST") return logout(request, env);
   if (path === "/api/me") return me(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/machines" && request.method === "POST") return createMachineRoute(request, env);
@@ -41,9 +44,28 @@ async function signup(request, env) {
   const user = await createUser(env, { email, handle });
   if (user.error) return json(user, user.status || 400);
   const machine = await createMachine(env, user.id, body.machine_name || "First machine");
-  const sessionToken = randomToken("bf_session");
-  await env.DB.prepare("INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)").bind(await sha256(sessionToken), user.id).run();
-  return json({ account: user.account, machine }, 201, {
+  const sessionToken = await createSession(env, user.id);
+  return json({ account: user.account, account_key: user.accountKey, machine }, 201, {
+    "Set-Cookie": cookie(sessionToken),
+  });
+}
+
+async function accountLogin(request, env) {
+  const body = await readBody(request);
+  const accountNumber = String(body.account_number || body.account || "").trim();
+  const accountKey = String(body.account_key || body.key || "").trim();
+  if (!accountNumber || !accountKey) return json({ error: "missing_account_credentials" }, 400);
+
+  const row = await env.DB.prepare(`
+    SELECT u.id
+    FROM users u
+    JOIN accounts a ON a.id = u.id
+    WHERE a.account_number = ? AND u.access_key_hash = ?
+  `).bind(accountNumber, await sha256(accountKey)).first();
+  if (!row) return json({ error: "invalid_account_credentials" }, 401);
+
+  const sessionToken = await createSession(env, row.id);
+  return json({ account: await accountView(env, row.id) }, 200, {
     "Set-Cookie": cookie(sessionToken),
   });
 }
@@ -74,6 +96,40 @@ async function requestMagicLink(request, env) {
   return json({ ok: true });
 }
 
+async function attachEmail(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const body = await readBody(request);
+  const email = cleanEmail(body.email);
+  if (!email) return json({ error: "invalid_email" }, 400);
+
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+  if (existing && existing.id !== user.id) return json({ error: "email_already_claimed" }, 409);
+
+  await env.DB.prepare("UPDATE users SET email = ?, email_verified_at = NULL WHERE id = ?").bind(email, user.id).run();
+  const token = randomToken("bfl");
+  await env.DB.prepare(`
+    INSERT INTO magic_links (token_hash, user_id, email, expires_at)
+    VALUES (?, ?, ?, datetime('now', '+15 minutes'))
+  `).bind(await sha256(token), user.id, email).run();
+
+  const origin = new URL(request.url).origin;
+  const link = `${origin}/auth/magic?token=${encodeURIComponent(token)}`;
+  const sent = await sendMagicEmail(env, email, link);
+  if (!sent.ok) return json({ error: "email_send_failed", detail: sent.error }, 502);
+  return json({ ok: true });
+}
+
+async function logout(request, env) {
+  const token = cookieValue(request, COOKIE_NAME);
+  if (token) {
+    await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();
+  }
+  return json({ ok: true }, 200, {
+    "Set-Cookie": expiredCookie(),
+  });
+}
+
 async function consumeMagicLink(request, env) {
   const token = new URL(request.url).searchParams.get("token") || "";
   if (!token) return html(authResultPage("Missing sign-in token.", false), 400);
@@ -84,11 +140,10 @@ async function consumeMagicLink(request, env) {
   `).bind(tokenHash).first();
   if (!row) return html(authResultPage("This sign-in link is expired or already used.", false), 400);
 
-  const sessionToken = randomToken("bf_session");
+  const sessionToken = await createSession(env, row.user_id);
   await env.DB.batch([
     env.DB.prepare("UPDATE magic_links SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE token_hash = ?").bind(tokenHash),
     env.DB.prepare("UPDATE users SET email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?").bind(row.user_id),
-    env.DB.prepare("INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)").bind(await sha256(sessionToken), row.user_id),
   ]);
   return new Response(authResultPage("Signed in. Redirecting to your dashboard.", true), {
     status: 200,
@@ -260,9 +315,10 @@ async function orgDays(env, orgID) {
 async function createUser(env, { email, handle }) {
   const id = crypto.randomUUID();
   const accountNumber = await uniqueAccountNumber(env);
+  const accountKey = randomToken("bfa");
   const statements = [
     env.DB.prepare("INSERT INTO accounts (id, account_number, kind, display_name) VALUES (?, ?, 'user', ?)").bind(id, accountNumber, handle || "Anonymous builder"),
-    env.DB.prepare("INSERT INTO users (id, email) VALUES (?, ?)").bind(id, email || null),
+    env.DB.prepare("INSERT INTO users (id, email, access_key_hash) VALUES (?, ?, ?)").bind(id, email || null, await sha256(accountKey)),
   ];
   if (handle) statements.push(env.DB.prepare("INSERT INTO handles (handle, account_id) VALUES (?, ?)").bind(handle, id));
   try {
@@ -273,7 +329,7 @@ async function createUser(env, { email, handle }) {
     if (message.includes("handles")) return { error: "handle_unavailable", status: 409 };
     throw error;
   }
-  return { id, account: await accountView(env, id) };
+  return { id, account: await accountView(env, id), accountKey };
 }
 
 async function createOrg(env, { handle, displayName, ownerUserID }) {
@@ -330,9 +386,15 @@ async function requireUser(request, env) {
   return { id: row.user_id };
 }
 
+async function createSession(env, userID) {
+  const sessionToken = randomToken("bf_session");
+  await env.DB.prepare("INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)").bind(await sha256(sessionToken), userID).run();
+  return sessionToken;
+}
+
 async function uniqueAccountNumber(env) {
   for (let i = 0; i < 8; i++) {
-    const accountNumber = "bf_" + randomBase36(8);
+    const accountNumber = "bf_" + randomBase36(16);
     const existing = await env.DB.prepare("SELECT id FROM accounts WHERE account_number = ?").bind(accountNumber).first();
     if (!existing) return accountNumber;
   }
@@ -357,6 +419,11 @@ function homePage() {
           <form data-login><input name="email" placeholder="email for magic link" autocomplete="email"><button class="secondary">Send magic link</button></form>
           <pre class="result" data-login-result hidden></pre>
         </div>
+        <div class="login">
+          <p class="muted">Anonymous account sign-in</p>
+          <form data-account-login><input name="account_number" placeholder="account number"><input name="account_key" placeholder="account key"><button class="secondary">Sign in</button></form>
+          <pre class="result" data-account-login-result hidden></pre>
+        </div>
       </section>
       <section class="preview">${heatmap(sampleDays())}</section>
     </main>
@@ -368,6 +435,7 @@ async function appPage(request, env) {
   const user = await requireUser(request, env);
   if (!user) return homePage();
   const account = await accountView(env, user.id);
+  const userInfo = await env.DB.prepare("SELECT email, email_verified_at FROM users WHERE id = ?").bind(user.id).first();
   const machines = await env.DB.prepare("SELECT machine_number, name, created_at, last_seen_at FROM machines WHERE user_id = ? ORDER BY created_at DESC").bind(user.id).all();
   const orgs = await env.DB.prepare(`
     SELECT a.account_number, h.handle, a.display_name, m.role
@@ -382,7 +450,7 @@ async function appPage(request, env) {
     <main class="dash">
       <header class="dash-head">
         <div><p class="eyebrow">Dashboard</p><h1>${esc(profileRef)}</h1></div>
-        <a class="button secondary" href="/${esc(profileRef)}">Public profile</a>
+        <div class="actions"><a class="button secondary" href="/${esc(profileRef)}">Public profile</a><button class="secondary" data-logout>Log out</button></div>
       </header>
       <section class="panel">
         <h2>Connect a machine</h2>
@@ -393,7 +461,10 @@ async function appPage(request, env) {
       </section>
       <section class="panel">
         <h2>Profile</h2>
+        <p class="muted">Account ${esc(account.account_number)}${userInfo.email ? ` · ${esc(userInfo.email)}${userInfo.email_verified_at ? " verified" : " unverified"}` : ""}</p>
         <form data-handle><input name="handle" placeholder="claim username"><button>Save username</button></form>
+        <form data-email><input name="email" placeholder="optional email for magic links" autocomplete="email"><button class="secondary">Add email</button></form>
+        <pre class="result" data-email-result hidden></pre>
       </section>
       <section class="panel">
         <h2>Organizations</h2>
@@ -477,7 +548,7 @@ function css() {
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#162117,#0b0c0f 44%);min-height:100vh}
     nav{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid #242932;background:rgba(11,12,15,.82);backdrop-filter:blur(14px);position:sticky;top:0}
     a{color:#dff6a0;text-decoration:none}button,.button{border:0;border-radius:8px;background:#d7ff70;color:#11160c;padding:11px 14px;font-weight:700;cursor:pointer;display:inline-flex}.secondary{background:#222a24;color:#dff6a0;border:1px solid #354231}
-    input,select{border:1px solid #343b45;background:#11151b;color:#f5f7fb;border-radius:8px;padding:11px 12px;min-width:0}code,pre{background:#11151b;border:1px solid #262d37;border-radius:8px;padding:10px;overflow:auto}
+    input,select{border:1px solid #343b45;background:#11151b;color:#f5f7fb;border-radius:8px;padding:11px 12px;min-width:0}code,pre{background:#11151b;border:1px solid #262d37;border-radius:8px;padding:10px;overflow:auto}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:48px;align-items:center;max-width:1180px;margin:0 auto;padding:72px 28px}.eyebrow{color:#9caf88;text-transform:uppercase;letter-spacing:.08em;font-size:12px;font-weight:800}.hero h1{font-size:58px;line-height:1.02;margin:10px 0 18px;letter-spacing:0}.lede{font-size:19px;color:#bcc7d4;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}.login{margin-top:28px}
     .preview{padding:28px;border:1px solid #26301f;background:#101511;border-radius:8px}.profile,.dash{max-width:1050px;margin:0 auto;padding:46px 28px}.profile-head,.dash-head{display:flex;justify-content:space-between;gap:22px;align-items:flex-start}.profile h1,.dash h1{font-size:44px;margin:0}.profile-head p{color:#bcc7d4}.panel{margin-top:24px;padding:22px 0;border-top:1px solid #252b34}.panel h2{margin:0 0 12px;font-size:20px}.muted{color:#aab4c1}
     .heatmap{display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:4px;overflow:auto;padding:18px 0}.cell{width:12px;height:12px;border-radius:3px;background:#1c232b}.l1{background:#24462e}.l2{background:#3f7d3c}.l3{background:#82bd45}.l4{background:#d7ff70}.embed{padding:14px;background:#0b0c0f;border:1px solid #222a24;border-radius:10px}.embed>div:first-child{display:flex;justify-content:space-between;color:#edf1f7}
@@ -496,7 +567,7 @@ function signupScript() {
       const res = await fetch("/api/signup", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
       result.hidden = false;
-      result.textContent = res.ok ? "Account: " + (data.account.handle || data.account.account_number) + "\\nMachine token: " + data.machine.token + "\\n\\nRun: pyro --profile " + (data.account.handle || data.account.account_number) + " --machine " + data.machine.token + "\\n\\nOpen /app when you have saved the token." : JSON.stringify(data, null, 2);
+      result.textContent = res.ok ? "Account: " + data.account.account_number + (data.account.handle ? " / " + data.account.handle : "") + "\\nAccount key: " + data.account_key + "\\nMachine token: " + data.machine.token + "\\n\\nRun: pyro --profile " + (data.account.handle || data.account.account_number) + " --machine " + data.machine.token + "\\n\\nSave the account key before closing this page. Open /app when you have saved it." : JSON.stringify(data, null, 2);
     });
     document.querySelector("[data-login]").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -507,6 +578,17 @@ function signupScript() {
       const data = await res.json();
       result.hidden = false;
       result.textContent = res.ok ? "Magic link sent. Check your email." : JSON.stringify(data, null, 2);
+    });
+    document.querySelector("[data-account-login]").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const result = document.querySelector("[data-account-login-result]");
+      const body = Object.fromEntries(new FormData(form).entries());
+      const res = await fetch("/api/account-login", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      result.hidden = false;
+      result.textContent = res.ok ? "Signed in. Opening dashboard..." : JSON.stringify(data, null, 2);
+      if (res.ok) location.href = "/app";
     });
   `;
 }
@@ -520,8 +602,10 @@ function dashboardScript() {
     }
     document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); out.hidden = false; out.textContent = "Machine token: " + data.machine.token; });
     document.querySelector("[data-handle]").addEventListener("submit", async e => { e.preventDefault(); await post(e.currentTarget, "/api/handles"); location.reload(); });
+    document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = data.ok ? "Verification link sent. Check your email." : JSON.stringify(data, null, 2); });
     document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const data = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); out.hidden = false; out.textContent = JSON.stringify(data, null, 2); });
     document.querySelectorAll("[data-add-member]").forEach(form => form.addEventListener("submit", async e => { e.preventDefault(); await post(e.currentTarget, "/api/orgs/" + e.currentTarget.dataset.org + "/members"); location.reload(); }));
+    document.querySelector("[data-logout]").addEventListener("click", async () => { await fetch("/api/logout", { method:"POST" }); location.href = "/"; });
   `;
 }
 
@@ -549,6 +633,10 @@ function html(body, status = 200) {
 
 function cookie(token) {
   return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000`;
+}
+
+function expiredCookie() {
+  return `${COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 }
 
 function cookieValue(request, name) {
