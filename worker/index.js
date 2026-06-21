@@ -18,6 +18,8 @@ async function route(request, env) {
   if (path === "/") return html(homePage());
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
+  if (path === "/api/magic-links" && request.method === "POST") return requestMagicLink(request, env);
+  if (path === "/auth/magic") return consumeMagicLink(request, env);
   if (path === "/api/me") return me(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/machines" && request.method === "POST") return createMachineRoute(request, env);
@@ -37,11 +39,64 @@ async function signup(request, env) {
   const email = cleanEmail(body.email);
   const handle = cleanHandle(body.username || body.handle);
   const user = await createUser(env, { email, handle });
+  if (user.error) return json(user, user.status || 400);
   const machine = await createMachine(env, user.id, body.machine_name || "First machine");
   const sessionToken = randomToken("bf_session");
   await env.DB.prepare("INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)").bind(await sha256(sessionToken), user.id).run();
   return json({ account: user.account, machine }, 201, {
     "Set-Cookie": cookie(sessionToken),
+  });
+}
+
+async function requestMagicLink(request, env) {
+  const body = await readBody(request);
+  const email = cleanEmail(body.email);
+  if (!email) return json({ error: "invalid_email" }, 400);
+
+  let user = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+  if (!user) {
+    const created = await createUser(env, { email, handle: "" });
+    if (created.error) return json(created, created.status || 400);
+    user = { id: created.id };
+  }
+
+  const token = randomToken("bfl");
+  const tokenHash = await sha256(token);
+  await env.DB.prepare(`
+    INSERT INTO magic_links (token_hash, user_id, email, expires_at)
+    VALUES (?, ?, ?, datetime('now', '+15 minutes'))
+  `).bind(tokenHash, user.id, email).run();
+
+  const origin = new URL(request.url).origin;
+  const link = `${origin}/auth/magic?token=${encodeURIComponent(token)}`;
+  const sent = await sendMagicEmail(env, email, link);
+  if (!sent.ok) return json({ error: "email_send_failed", detail: sent.error }, 502);
+  return json({ ok: true });
+}
+
+async function consumeMagicLink(request, env) {
+  const token = new URL(request.url).searchParams.get("token") || "";
+  if (!token) return html(authResultPage("Missing sign-in token.", false), 400);
+  const tokenHash = await sha256(token);
+  const row = await env.DB.prepare(`
+    SELECT user_id FROM magic_links
+    WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > datetime('now')
+  `).bind(tokenHash).first();
+  if (!row) return html(authResultPage("This sign-in link is expired or already used.", false), 400);
+
+  const sessionToken = randomToken("bf_session");
+  await env.DB.batch([
+    env.DB.prepare("UPDATE magic_links SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE token_hash = ?").bind(tokenHash),
+    env.DB.prepare("UPDATE users SET email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?").bind(row.user_id),
+    env.DB.prepare("INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)").bind(await sha256(sessionToken), row.user_id),
+  ]);
+  return new Response(authResultPage("Signed in. Redirecting to your dashboard.", true), {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Set-Cookie": cookie(sessionToken),
+      "Refresh": "1; url=/app",
+    },
   });
 }
 
@@ -210,7 +265,14 @@ async function createUser(env, { email, handle }) {
     env.DB.prepare("INSERT INTO users (id, email) VALUES (?, ?)").bind(id, email || null),
   ];
   if (handle) statements.push(env.DB.prepare("INSERT INTO handles (handle, account_id) VALUES (?, ?)").bind(handle, id));
-  await env.DB.batch(statements);
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    if (message.includes("users.email")) return { error: "email_already_claimed", status: 409 };
+    if (message.includes("handles")) return { error: "handle_unavailable", status: 409 };
+    throw error;
+  }
   return { id, account: await accountView(env, id) };
 }
 
@@ -290,6 +352,11 @@ function homePage() {
           <button>Create anonymous account</button>
         </form>
         <pre class="result" data-result hidden></pre>
+        <div class="login">
+          <p class="muted">Already have an email on the account?</p>
+          <form data-login><input name="email" placeholder="email for magic link" autocomplete="email"><button class="secondary">Send magic link</button></form>
+          <pre class="result" data-login-result hidden></pre>
+        </div>
       </section>
       <section class="preview">${heatmap(sampleDays())}</section>
     </main>
@@ -375,6 +442,10 @@ function notFoundPage() {
   return layout("Not found", `<main class="profile"><h1>Profile not found</h1><a href="/">Create one</a></main>`);
 }
 
+function authResultPage(message, ok) {
+  return layout(ok ? "Signed in" : "Sign in failed", `<main class="profile"><p class="eyebrow">${ok ? "Success" : "Link error"}</p><h1>${esc(message)}</h1><a href="/app">Open dashboard</a></main>`);
+}
+
 function layout(title, body) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${css()}</style></head><body><nav><a href="/">Burnfolio</a><a href="/app">App</a></nav>${body}</body></html>`;
 }
@@ -407,7 +478,7 @@ function css() {
     nav{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid #242932;background:rgba(11,12,15,.82);backdrop-filter:blur(14px);position:sticky;top:0}
     a{color:#dff6a0;text-decoration:none}button,.button{border:0;border-radius:8px;background:#d7ff70;color:#11160c;padding:11px 14px;font-weight:700;cursor:pointer;display:inline-flex}.secondary{background:#222a24;color:#dff6a0;border:1px solid #354231}
     input,select{border:1px solid #343b45;background:#11151b;color:#f5f7fb;border-radius:8px;padding:11px 12px;min-width:0}code,pre{background:#11151b;border:1px solid #262d37;border-radius:8px;padding:10px;overflow:auto}
-    .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:48px;align-items:center;max-width:1180px;margin:0 auto;padding:72px 28px}.eyebrow{color:#9caf88;text-transform:uppercase;letter-spacing:.08em;font-size:12px;font-weight:800}.hero h1{font-size:58px;line-height:1.02;margin:10px 0 18px;letter-spacing:0}.lede{font-size:19px;color:#bcc7d4;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}
+    .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:48px;align-items:center;max-width:1180px;margin:0 auto;padding:72px 28px}.eyebrow{color:#9caf88;text-transform:uppercase;letter-spacing:.08em;font-size:12px;font-weight:800}.hero h1{font-size:58px;line-height:1.02;margin:10px 0 18px;letter-spacing:0}.lede{font-size:19px;color:#bcc7d4;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}.login{margin-top:28px}
     .preview{padding:28px;border:1px solid #26301f;background:#101511;border-radius:8px}.profile,.dash{max-width:1050px;margin:0 auto;padding:46px 28px}.profile-head,.dash-head{display:flex;justify-content:space-between;gap:22px;align-items:flex-start}.profile h1,.dash h1{font-size:44px;margin:0}.profile-head p{color:#bcc7d4}.panel{margin-top:24px;padding:22px 0;border-top:1px solid #252b34}.panel h2{margin:0 0 12px;font-size:20px}.muted{color:#aab4c1}
     .heatmap{display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:4px;overflow:auto;padding:18px 0}.cell{width:12px;height:12px;border-radius:3px;background:#1c232b}.l1{background:#24462e}.l2{background:#3f7d3c}.l3{background:#82bd45}.l4{background:#d7ff70}.embed{padding:14px;background:#0b0c0f;border:1px solid #222a24;border-radius:10px}.embed>div:first-child{display:flex;justify-content:space-between;color:#edf1f7}
     .list{display:grid;gap:10px;margin-top:16px}.row{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:12px}.row span{display:block;color:#9faab8;font-size:13px;margin-top:3px}.row form{justify-content:flex-end}
@@ -425,8 +496,17 @@ function signupScript() {
       const res = await fetch("/api/signup", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
       result.hidden = false;
-      result.textContent = res.ok ? "Account: " + (data.account.handle || data.account.account_number) + "\\nMachine token: " + data.machine.token + "\\n\\nRun: pyro --profile " + (data.account.handle || data.account.account_number) + " --machine " + data.machine.token : JSON.stringify(data, null, 2);
-      if (res.ok) setTimeout(() => location.href = "/app", 1400);
+      result.textContent = res.ok ? "Account: " + (data.account.handle || data.account.account_number) + "\\nMachine token: " + data.machine.token + "\\n\\nRun: pyro --profile " + (data.account.handle || data.account.account_number) + " --machine " + data.machine.token + "\\n\\nOpen /app when you have saved the token." : JSON.stringify(data, null, 2);
+    });
+    document.querySelector("[data-login]").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const result = document.querySelector("[data-login-result]");
+      const body = Object.fromEntries(new FormData(form).entries());
+      const res = await fetch("/api/magic-links", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      result.hidden = false;
+      result.textContent = res.ok ? "Magic link sent. Check your email." : JSON.stringify(data, null, 2);
     });
   `;
 }
@@ -510,6 +590,24 @@ function cleanHandle(value) {
 function cleanEmail(value) {
   value = String(value || "").trim().toLowerCase();
   return value && value.includes("@") ? value : "";
+}
+
+async function sendMagicEmail(env, to, link) {
+  if (!env.EMAIL || typeof env.EMAIL.send !== "function") {
+    return { ok: false, error: "EMAIL binding is not configured" };
+  }
+  try {
+    await env.EMAIL.send({
+      to,
+      from: { email: "login@burnfolio.ai", name: "Burnfolio" },
+      subject: "Sign in to Burnfolio",
+      text: `Use this link to sign in to Burnfolio. It expires in 15 minutes.\n\n${link}`,
+      html: `<p>Use this link to sign in to Burnfolio. It expires in 15 minutes.</p><p><a href="${esc(link)}">Sign in to Burnfolio</a></p>`,
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: String(error && error.message ? error.message : error) };
+  }
 }
 
 function cleanText(value, max) {

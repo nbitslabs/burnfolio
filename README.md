@@ -3,6 +3,9 @@
 Burnfolio collects local AI coding-agent usage data and summarizes token burn by UTC
 date, CLI type, and model.
 
+The hosted app runs on Cloudflare Workers at `https://burnfolio.ai`, with D1 for
+storage and Cloudflare Email Service for optional magic-link sign-in.
+
 Current collectors:
 
 - Claude: `~/.claude`

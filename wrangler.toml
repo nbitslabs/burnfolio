@@ -10,3 +10,7 @@ routes = [
 binding = "DB"
 database_name = "burnfolio"
 database_id = "438436b3-8410-4a91-b3bc-ec32e0610d27"
+
+[[send_email]]
+name = "EMAIL"
+remote = true
