@@ -506,6 +506,8 @@ function orgRow(org) {
 function profileHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
   const stats = profile.stats;
+  const scriptSnippet = `<script src="https://burnfolio.ai/embed/${name}/script.js"></script>`;
+  const svgSnippet = `<img src="https://burnfolio.ai/embed/${name}.svg" alt="Burnfolio token burn graph">`;
   const identity = [
     `${profile.account.kind} profile`,
     `account ${profile.account.account_number}`,
@@ -522,16 +524,18 @@ function profileHtml(profile) {
         <div class="actions"><a class="button secondary" href="${profile.embed_url}">Embed</a></div>
       </header>
       <section class="stats">
-        <div><span>Total burn</span><strong>${formatInt(profile.total_tokens)}</strong></div>
-        <div><span>Active days</span><strong>${formatInt(stats.active_days)}</strong></div>
-        <div><span>Best day</span><strong>${formatInt(stats.best_day_tokens)}</strong><em>${esc(stats.best_day || "No activity yet")}</em></div>
-        <div><span>Current streak</span><strong>${formatInt(stats.current_streak_days)}</strong></div>
+        ${statCard("Total burn", formatInt(profile.total_tokens))}
+        ${statCard("Active days", formatInt(stats.active_days))}
+        ${statCard("Best day", formatInt(stats.best_day_tokens), stats.best_day || "No activity yet")}
+        ${statCard("Current streak", formatInt(stats.current_streak_days))}
       </section>
-      ${heatmap(profile.days, { title: "Token burn graph", subtitle: `${formatInt(stats.last_365_tokens)} tokens in the last 365 days` })}
+      ${heatmapTimeline(profile.days, { title: "Token burn timeline", subtitle: `${formatInt(stats.last_365_tokens)} tokens in the last 365 days` })}
       <section class="panel">
         <h2>Embed</h2>
-        <code>&lt;script src="https://burnfolio.ai/embed/${esc(name)}/script.js"&gt;&lt;/script&gt;</code>
-        <code>&lt;img src="https://burnfolio.ai/embed/${esc(name)}.svg" alt="Burnfolio token burn graph"&gt;</code>
+        <div class="snippets">
+          ${snippet("Iframe script", scriptSnippet)}
+          ${snippet("Static SVG", svgSnippet)}
+        </div>
       </section>
     </main>
   `);
@@ -539,7 +543,7 @@ function profileHtml(profile) {
 
 function embedHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
-  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days` })}</div>`;
+  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days` })}</div><script>${globalScript()}</script>`;
 }
 
 function svgEmbed(profile) {
@@ -582,14 +586,14 @@ function authResultPage(message, ok) {
 }
 
 function layout(title, body) {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${css()}</style></head><body><nav><a href="/">Burnfolio</a><a href="/app">App</a></nav>${body}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${css()}</style></head><body><nav><a href="/">Burnfolio</a><a href="/app">App</a></nav>${body}<script>${globalScript()}</script></body></html>`;
 }
 
 function heatmap(days, options = {}) {
-  const cells = heatmapCellData(days).map((cell) => `<span title="${cell.date}: ${formatInt(cell.value)}" class="cell l${cell.level}"></span>`);
+  const cells = heatmapCellData(days).map((cell) => heatmapCell(cell));
   return `<section class="${options.compact ? "graph compact" : "graph"}">
     ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
-    <div class="heatmap" aria-label="Token burn by UTC day">${cells.join("")}</div>
+    <div class="heatmap-scroll"><div class="heatmap" aria-label="Token burn by UTC day">${cells.join("")}</div></div>
   </section>`;
 }
 
@@ -606,8 +610,66 @@ function heatmapCellData(days) {
   return cells;
 }
 
+function heatmapTimeline(days, options = {}) {
+  const years = heatmapYears(days);
+  return `<section class="graph timeline">
+    <div class="graph-head"><div><h2>${esc(options.title || "Token burn timeline")}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>
+    <div class="timeline-years">${years.map((year) => {
+      const cells = yearHeatmapCellData(days, year).map((cell) => heatmapCell(cell)).join("");
+      const total = days.filter((day) => day.date_utc.startsWith(String(year))).reduce((sum, day) => sum + day.total_tokens, 0);
+      return `<section class="year-row"><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll"><div class="heatmap year-heatmap" aria-label="Token burn by UTC day in ${year}">${cells}</div></div></section>`;
+    }).join("")}</div>
+  </section>`;
+}
+
+function heatmapYears(days) {
+  const currentYear = new Date().getUTCFullYear();
+  let minYear = currentYear;
+  for (const day of days) {
+    const year = Number(String(day.date_utc || "").slice(0, 4));
+    if (Number.isFinite(year) && year > 2000) minYear = Math.min(minYear, year);
+  }
+  const years = [];
+  for (let year = currentYear; year >= minYear; year--) years.push(year);
+  return years;
+}
+
+function yearHeatmapCellData(days, year) {
+  const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
+  const cells = [];
+  const today = new Date();
+  const todayUTC = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const first = new Date(Date.UTC(year, 0, 1));
+  const yearEnd = new Date(Date.UTC(year, 11, 31));
+  const last = year === todayUTC.getUTCFullYear() ? todayUTC : yearEnd;
+  for (let i = 0; i < first.getUTCDay(); i++) cells.push({ empty: true });
+  for (let d = new Date(first); d <= last; d.setUTCDate(d.getUTCDate() + 1)) {
+    const date = d.toISOString().slice(0, 10);
+    const value = byDate.get(date) || 0;
+    cells.push({ date, value, level: level(value) });
+  }
+  if (year !== todayUTC.getUTCFullYear()) {
+    while (cells.length % 7 !== 0) cells.push({ empty: true });
+  }
+  return cells;
+}
+
+function heatmapCell(cell) {
+  if (cell.empty) return `<span class="cell empty" aria-hidden="true"></span>`;
+  const tip = `${cell.date}: ${formatInt(cell.value)} tokens`;
+  return `<span title="${esc(tip)}" data-tip="${esc(tip)}" class="cell l${cell.level}" role="img" aria-label="${esc(tip)}"></span>`;
+}
+
 function legend() {
   return `<div class="legend"><span>Less</span><i class="cell l0"></i><i class="cell l1"></i><i class="cell l2"></i><i class="cell l3"></i><i class="cell l4"></i><span>More</span></div>`;
+}
+
+function statCard(label, value, detail = "") {
+  return `<div><span>${esc(label)}</span><strong>${esc(value)}</strong>${detail ? `<em>${esc(detail)}</em>` : ""}</div>`;
+}
+
+function snippet(label, code) {
+  return `<div class="snippet"><div><span>${esc(label)}</span><button type="button" class="secondary copy" data-copy="${esc(code)}">Copy</button></div><code>${esc(code)}</code></div>`;
 }
 
 function profileStats(days, total) {
@@ -657,18 +719,21 @@ function level(value) {
 
 function css() {
   return `
-    :root{color-scheme:dark;background:#0b0c0f;color:#edf1f7;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-    *{box-sizing:border-box}body{margin:0;background:#0b0c0f;min-height:100vh}
-    nav{height:58px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid #242932;background:rgba(11,12,15,.82);backdrop-filter:blur(14px);position:sticky;top:0}
-    a{color:#dff6a0;text-decoration:none}button,.button{border:0;border-radius:8px;background:#d7ff70;color:#11160c;padding:11px 14px;font-weight:700;cursor:pointer;display:inline-flex}.secondary{background:#222a24;color:#dff6a0;border:1px solid #354231}
-    input,select{border:1px solid #343b45;background:#11151b;color:#f5f7fb;border-radius:8px;padding:11px 12px;min-width:0}code,pre{background:#11151b;border:1px solid #262d37;border-radius:8px;padding:10px;overflow:auto}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-    .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:48px;align-items:center;max-width:1180px;margin:0 auto;padding:72px 28px}.eyebrow{color:#9caf88;text-transform:uppercase;letter-spacing:0;font-size:12px;font-weight:800}.hero h1{font-size:58px;line-height:1.02;margin:10px 0 18px;letter-spacing:0}.lede{font-size:19px;color:#bcc7d4;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}.login{margin-top:28px}
-    .setup{display:grid;gap:12px;margin-top:18px;padding:16px;border:1px solid #293321;background:#101511;border-radius:8px;white-space:normal}.setup h2{font-size:18px;margin:0}.setup p{margin:0;color:#aab4c1}.secret-grid{display:grid;gap:10px}.secret{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:10px}.secret span{display:block;color:#9faab8;font-size:12px;text-transform:uppercase;font-weight:800}.secret code{display:block;margin-top:5px;padding:0;border:0;background:transparent;color:#edf1f7;white-space:normal;overflow-wrap:anywhere}.copy{padding:9px 11px}
-    .preview{padding:28px;border:1px solid #26301f;background:#101511;border-radius:8px}.profile,.dash{max-width:1050px;margin:0 auto;padding:46px 28px}.profile-head,.dash-head{display:flex;justify-content:space-between;gap:22px;align-items:flex-start}.profile h1,.dash h1{font-size:44px;margin:0}.profile-head p{color:#bcc7d4}.panel{margin-top:24px;padding:22px 0;border-top:1px solid #252b34}.panel h2{margin:0 0 12px;font-size:20px}.muted{color:#aab4c1}
-    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:30px 0}.stats div{border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:14px}.stats span{display:block;color:#9faab8;font-size:12px;text-transform:uppercase;font-weight:800}.stats strong{display:block;font-size:25px;margin-top:6px}.stats em{display:block;color:#9faab8;font-style:normal;font-size:12px;margin-top:4px}
-    .graph{border:1px solid #26301f;background:#101511;border-radius:8px;padding:18px 18px 8px;margin-top:22px}.graph.compact{border:0;background:transparent;padding:8px 0 0;margin-top:8px}.graph-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.graph-head h2{font-size:19px;margin:0}.graph-head p{margin:5px 0 0;color:#9faab8}.graph-head.small{align-items:center}.legend{display:flex;align-items:center;gap:5px;color:#9faab8;font-size:12px;white-space:nowrap}.heatmap{display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:4px;overflow:auto;padding:18px 0}.cell{width:12px;height:12px;border-radius:3px;background:#1c232b;display:inline-block}.l1{background:#24462e}.l2{background:#3f7d3c}.l3{background:#82bd45}.l4{background:#d7ff70}.embed{padding:14px;background:#0b0c0f;border:1px solid #222a24;border-radius:8px}.embed>div:first-child{display:flex;justify-content:space-between;color:#edf1f7}
-    .list{display:grid;gap:10px;margin-top:16px}.row{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid #222a24;background:#0f1317;border-radius:8px;padding:12px}.row span{display:block;color:#9faab8;font-size:13px;margin-top:3px}.row form{justify-content:flex-end}
-    @media(max-width:820px){.hero{grid-template-columns:1fr;padding-top:42px}.hero h1{font-size:42px}nav{padding:0 18px}.profile-head,.dash-head{display:block}.signup input,form input{width:100%}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.graph-head{display:block}.legend{margin-top:12px}}
+    :root{color-scheme:dark;--bg:#07090d;--ink:#f3f7ff;--muted:#a8b2c1;--line:#263241;--panel:rgba(13,18,25,.82);--panel2:rgba(14,24,18,.78);--lime:#d8ff63;--green:#76d45c;--cyan:#66e1ff;--gold:#ffd166;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+    *{box-sizing:border-box}html{background:var(--bg)}body{margin:0;min-height:100vh;background:linear-gradient(135deg,#05070b 0%,#0b1020 42%,#10140d 100%);overflow-x:hidden}
+    body:before{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;background-image:linear-gradient(rgba(102,225,255,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(216,255,99,.06) 1px,transparent 1px),linear-gradient(125deg,transparent 0 48%,rgba(255,209,102,.12) 49%,transparent 51%);background-size:44px 44px,44px 44px,220px 220px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.95),rgba(0,0,0,.22))}
+    body:after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:linear-gradient(115deg,rgba(216,255,99,.18),transparent 28%),linear-gradient(245deg,rgba(102,225,255,.15),transparent 34%),linear-gradient(180deg,transparent 0 60%,rgba(255,209,102,.07));opacity:1}
+    nav{height:62px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid rgba(124,150,180,.18);background:rgba(5,7,11,.72);backdrop-filter:blur(18px);position:sticky;top:0;z-index:10}nav a:first-child{font-weight:900;color:var(--ink)}a{color:var(--lime);text-decoration:none}button,.button{border:0;border-radius:8px;background:linear-gradient(135deg,var(--lime),#8dff82);color:#11160c;padding:11px 14px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;min-height:40px}.secondary{background:rgba(32,43,36,.86);color:#e6ffad;border:1px solid rgba(216,255,99,.22)}
+    input,select{border:1px solid rgba(126,146,171,.28);background:rgba(10,15,22,.86);color:#f5f7fb;border-radius:8px;padding:11px 12px;min-width:0}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:rgba(8,13,20,.9);border:1px solid rgba(104,128,158,.28);border-radius:8px;padding:10px;overflow:auto}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,620px);gap:58px;align-items:center;max-width:1180px;margin:0 auto;padding:78px 28px}.eyebrow{color:#b9caa6;text-transform:uppercase;letter-spacing:0;font-size:12px;font-weight:900;overflow-wrap:anywhere}.hero h1{font-size:clamp(46px,6vw,76px);line-height:.98;margin:10px 0 20px;letter-spacing:0;max-width:720px;background:linear-gradient(90deg,#ffffff 0%,#d8ff63 46%,#66e1ff 100%);-webkit-background-clip:text;background-clip:text;color:transparent}.lede{font-size:19px;color:#c4cfdd;max-width:620px}.signup,form{display:flex;gap:10px;flex-wrap:wrap}.result{margin-top:18px;white-space:pre-wrap}.login{margin-top:28px}
+    .setup{display:grid;gap:12px;margin-top:18px;padding:16px;border:1px solid rgba(216,255,99,.2);background:linear-gradient(145deg,rgba(16,25,18,.92),rgba(10,15,22,.92));border-radius:8px;white-space:normal}.setup h2{font-size:18px;margin:0}.setup p{margin:0;color:var(--muted)}.secret-grid{display:grid;gap:10px}.secret{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid rgba(110,132,160,.24);background:rgba(9,14,20,.82);border-radius:8px;padding:10px}.secret span,.snippet span{display:block;color:#aeb9c7;font-size:12px;text-transform:uppercase;font-weight:900}.secret code{display:block;margin-top:5px;padding:0;border:0;background:transparent;color:var(--ink);white-space:normal;overflow-wrap:anywhere}.copy{padding:9px 11px}
+    .preview{padding:28px;border:1px solid rgba(216,255,99,.18);background:linear-gradient(145deg,rgba(14,24,18,.84),rgba(10,16,25,.84));border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,.28)}.profile,.dash{width:100%;max-width:1120px;margin:0 auto;padding:52px 28px}.profile-head,.dash-head{display:flex;justify-content:space-between;gap:22px;align-items:flex-start;border-left:3px solid var(--lime);padding-left:18px}.profile h1,.dash h1{font-size:clamp(34px,5vw,58px);line-height:1.02;margin:0;letter-spacing:0;overflow-wrap:anywhere;word-break:break-word;background:linear-gradient(90deg,#ffffff 0%,#d8ff63 54%,#66e1ff 100%);-webkit-background-clip:text;background-clip:text;color:transparent}.profile-head p{color:#c4cfdd;overflow-wrap:anywhere;word-break:break-word}.panel{min-width:0;margin-top:24px;padding:22px 0;border-top:1px solid rgba(133,154,183,.2)}.panel h2{margin:0 0 12px;font-size:20px}.muted{color:var(--muted)}
+    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:32px 0}.stats div{min-width:0;border:1px solid rgba(111,133,162,.25);background:linear-gradient(145deg,rgba(13,18,25,.9),rgba(10,15,22,.72));border-radius:8px;padding:15px;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}.stats span{display:block;color:#aeb9c7;font-size:12px;text-transform:uppercase;font-weight:900}.stats strong{display:block;font-size:clamp(21px,2.8vw,30px);line-height:1.08;margin-top:8px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.stats em{display:block;color:var(--muted);font-style:normal;font-size:12px;margin-top:6px;overflow-wrap:anywhere}
+    .graph{min-width:0;border:1px solid rgba(216,255,99,.18);background:linear-gradient(145deg,rgba(14,24,18,.82),rgba(8,14,22,.84));border-radius:8px;padding:20px;margin-top:24px;box-shadow:0 22px 80px rgba(0,0,0,.22)}.graph.compact{border:1px solid rgba(216,255,99,.14);background:rgba(9,14,18,.45);padding:16px;margin-top:8px}.graph-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.graph-head h2{font-size:21px;margin:0}.graph-head p{margin:5px 0 0;color:var(--muted)}.graph-head.small{align-items:center}.legend{display:flex;align-items:center;gap:5px;color:#c5ceda;font-size:12px;white-space:nowrap}.legend .cell{--cell:11px;flex:0 0 auto}.heatmap-scroll{width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:visible;padding:16px 0 4px}.heatmap{--cell:12px;display:grid;grid-template-rows:repeat(7,var(--cell));grid-auto-flow:column;grid-auto-columns:var(--cell);gap:4px;min-width:max-content}.cell{width:var(--cell);height:var(--cell);border-radius:3px;background:#1b2533;display:inline-block;box-shadow:inset 0 0 0 1px rgba(255,255,255,.03)}.cell.empty{visibility:hidden}.l1{background:#214936}.l2{background:#3f8f48}.l3{background:#9bd64b}.l4{background:#d8ff63;box-shadow:0 0 14px rgba(216,255,99,.22)}.timeline-years{min-width:0;display:grid;gap:20px;margin-top:8px}.year-row{min-width:0;display:grid;grid-template-columns:132px minmax(0,1fr);gap:18px;align-items:start}.year-label strong{display:block;font-size:18px}.year-label span{display:block;color:var(--muted);font-size:12px;margin-top:4px}.year-heatmap{--cell:11px}.burn-tooltip{position:fixed;z-index:50;max-width:280px;padding:8px 10px;border:1px solid rgba(216,255,99,.25);border-radius:8px;background:#080d14;color:var(--ink);font-size:12px;box-shadow:0 16px 50px rgba(0,0,0,.45);pointer-events:none;transform:translate(-50%,-120%);white-space:nowrap}
+    .snippets{min-width:0;display:grid;gap:12px}.snippet{min-width:0;border:1px solid rgba(111,133,162,.26);background:rgba(8,13,20,.86);border-radius:8px;padding:12px}.snippet>div{display:flex;align-items:center;justify-content:space-between;gap:12px}.snippet code{display:block;min-width:0;margin-top:10px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;line-height:1.45}.embed{padding:14px;background:linear-gradient(145deg,rgba(9,14,20,.96),rgba(14,24,18,.92));border:1px solid rgba(216,255,99,.18);border-radius:8px}.embed>div:first-child{display:flex;justify-content:space-between;gap:16px;color:var(--ink)}.embed strong,.embed span{overflow-wrap:anywhere}
+    .list{display:grid;gap:10px;margin-top:16px}.row{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid rgba(111,133,162,.24);background:rgba(13,18,25,.82);border-radius:8px;padding:12px;min-width:0}.row span{display:block;color:var(--muted);font-size:13px;margin-top:3px;overflow-wrap:anywhere}.row form{justify-content:flex-end}.row strong{overflow-wrap:anywhere}
+    @media(max-width:820px){nav{padding:0 18px}.hero{grid-template-columns:1fr;padding:42px 20px}.hero h1{font-size:44px}.profile,.dash{padding:34px 18px;overflow:hidden}.profile-head,.dash-head{display:block}.actions{margin-top:16px}.signup input,form input{width:100%}.stats{grid-template-columns:1fr;gap:10px}.stats div{padding:13px}.stats strong{font-size:24px}.graph{padding:16px}.graph-head{display:block}.legend{margin-top:12px}.year-row{grid-template-columns:minmax(0,1fr);gap:8px}.year-label{display:block}.row{display:grid}.row form{justify-content:stretch}.heatmap{--cell:12px}.year-heatmap{--cell:10px}.profile-head p{overflow-wrap:anywhere;word-break:break-word}.embed>div:first-child{display:grid}}
+    @media(max-width:460px){.hero h1{font-size:38px}.profile h1,.dash h1{font-size:32px}.secret{grid-template-columns:1fr}.secret .copy{justify-self:start}.snippet code{font-size:14px}.year-heatmap{--cell:9px}.year-label span{font-size:11px;overflow-wrap:anywhere}}
   `;
 }
 
@@ -823,6 +888,42 @@ function sampleDays() {
   });
 }
 
+function globalScript() {
+  return `
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(button.dataset.copy || "");
+          button.textContent = "Copied";
+        } catch {
+          button.textContent = "Select";
+        }
+        setTimeout(() => button.textContent = "Copy", 1200);
+      });
+    });
+    const tip = document.createElement("div");
+    tip.className = "burn-tooltip";
+    tip.hidden = true;
+    document.body.appendChild(tip);
+    function showTip(event) {
+      const target = event.target.closest("[data-tip]");
+      if (!target) return;
+      tip.textContent = target.dataset.tip;
+      tip.hidden = false;
+      const rect = target.getBoundingClientRect();
+      tip.style.left = rect.left + rect.width / 2 + "px";
+      tip.style.top = rect.top - 8 + "px";
+    }
+    function hideTip() {
+      tip.hidden = true;
+    }
+    document.addEventListener("mouseover", showTip);
+    document.addEventListener("focusin", showTip);
+    document.addEventListener("mouseout", (event) => { if (event.target.closest("[data-tip]")) hideTip(); });
+    document.addEventListener("focusout", (event) => { if (event.target.closest("[data-tip]")) hideTip(); });
+  `;
+}
+
 async function readBody(request) {
   const type = request.headers.get("content-type") || "";
   if (type.includes("application/json")) return request.json();
@@ -896,13 +997,53 @@ async function sendMagicEmail(env, to, link) {
       to,
       from: { email: "login@burnfolio.ai", name: "Burnfolio" },
       subject: "Sign in to Burnfolio",
-      text: `Use this link to sign in to Burnfolio. It expires in 15 minutes.\n\n${link}`,
-      html: `<p>Use this link to sign in to Burnfolio. It expires in 15 minutes.</p><p><a href="${esc(link)}">Sign in to Burnfolio</a></p>`,
+      text: magicEmailText(link),
+      html: magicEmailHtml(link),
     });
     return { ok: true };
   } catch (error) {
     return { ok: false, error: String(error && error.message ? error.message : error) };
   }
+}
+
+function magicEmailText(link) {
+  return `Sign in to Burnfolio\n\nUse this link to open your Burnfolio dashboard. It expires in 15 minutes.\n\n${link}\n\nIf you did not request this email, you can ignore it.`;
+}
+
+function magicEmailHtml(link) {
+  const safeLink = esc(link);
+  return `<!doctype html>
+<html>
+  <body style="margin:0;background:#07090d;color:#f3f7ff;font-family:Inter,Segoe UI,Arial,sans-serif">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#07090d;padding:32px 16px">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;border:1px solid #263241;border-radius:8px;background:#0d1219;overflow:hidden">
+            <tr>
+              <td style="padding:28px 28px 10px;border-top:4px solid #d8ff63">
+                <div style="font-size:18px;font-weight:800;color:#f3f7ff">Burnfolio</div>
+                <h1 style="margin:28px 0 10px;font-size:28px;line-height:1.1;color:#f3f7ff">Open your token burn dashboard</h1>
+                <p style="margin:0;color:#a8b2c1;font-size:15px;line-height:1.55">This magic link signs you in to Burnfolio and expires in 15 minutes.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 28px">
+                <a href="${safeLink}" style="display:inline-block;background:#d8ff63;color:#11160c;text-decoration:none;font-weight:800;border-radius:8px;padding:13px 18px">Sign in to Burnfolio</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 28px 28px">
+                <p style="margin:0 0 10px;color:#a8b2c1;font-size:13px;line-height:1.5">If the button does not work, paste this URL into your browser:</p>
+                <p style="margin:0;padding:12px;border:1px solid #263241;border-radius:8px;background:#080d14;color:#d8ff63;font-size:12px;line-height:1.45;word-break:break-all">${safeLink}</p>
+                <p style="margin:18px 0 0;color:#6f7d8f;font-size:12px;line-height:1.5">If you did not request this email, you can ignore it.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
 }
 
 function cleanText(value, max) {
