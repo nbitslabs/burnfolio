@@ -218,7 +218,11 @@ async function addOrgMemberRoute(request, env, orgRef) {
   const member = await resolveAccount(env, body.user || body.account || body.handle);
   if (!member || member.kind !== "user") return json({ error: "user_not_found" }, 404);
   const role = body.role === "admin" ? "admin" : "member";
-  await env.DB.prepare("INSERT OR REPLACE INTO memberships (org_id, user_id, role) VALUES (?, ?, ?)").bind(org.id, member.id, role).run();
+  await env.DB.prepare(`
+    INSERT INTO memberships (org_id, user_id, role)
+    VALUES (?, ?, ?)
+    ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role
+  `).bind(org.id, member.id, role).run();
   return json({ ok: true });
 }
 
