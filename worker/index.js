@@ -505,11 +505,16 @@ function orgRow(org) {
 function profileHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
   const stats = profile.stats;
+  const identity = [
+    `${profile.account.kind} profile`,
+    `account ${profile.account.account_number}`,
+    profile.account.display_name && profile.account.display_name !== name ? profile.account.display_name : "",
+  ].filter(Boolean).join(" · ");
   return layout(`${name} on Burnfolio`, `
     <main class="profile">
       <header class="profile-head">
         <div>
-          <p class="eyebrow">${profile.account.kind} profile</p>
+          <p class="eyebrow">${esc(identity)}</p>
           <h1>${esc(name)}</h1>
           <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active UTC days</p>
         </div>
