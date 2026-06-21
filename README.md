@@ -77,6 +77,27 @@ By default it uses `https://burnfolio.ai` and the `pi` collector to keep the
 test lightweight. Override with `BURNFOLIO_SERVER` or
 `BURNFOLIO_SMOKE_PROVIDERS` when needed.
 
+For a real account acceptance pass, set the profile and machine token generated
+by the dashboard:
+
+```sh
+BURNFOLIO_PROFILE=<account-or-username> \
+BURNFOLIO_MACHINE=<machine-token> \
+scripts/verify-account.sh
+```
+
+Optional checks can verify a fresh second machine and an org profile:
+
+```sh
+BURNFOLIO_PROFILE=<account-or-username> \
+BURNFOLIO_MACHINE=<machine-token> \
+BURNFOLIO_SECOND_MACHINE=<second-machine-token> \
+BURNFOLIO_EXPECT_SECOND_INCREASE=1 \
+BURNFOLIO_ORG=nbitslabs \
+BURNFOLIO_EXPECT_ORG_MATCH=1 \
+scripts/verify-account.sh
+```
+
 Profiles expose both iframe and SVG embeds:
 
 ```html
