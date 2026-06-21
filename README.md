@@ -22,7 +22,12 @@ Useful flags:
 go run ./cmd/pyro -providers claude,codex
 go run ./cmd/pyro -json
 go run ./cmd/pyro -home /path/to/home
+go run ./cmd/pyro -profile bf_ab12cd34 -machine bfm_...
 ```
 
 The table output is grouped by UTC date, CLI, and model. JSON output includes
 provider totals plus the same date/CLI/model segments for the future server API.
+
+When `-profile` and `-machine` are provided, the CLI uploads all local history to
+Burnfolio as one idempotent total per UTC day. Re-running the same command
+replaces each machine/day row instead of double-counting it.
