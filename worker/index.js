@@ -1,4 +1,10 @@
 const COOKIE_NAME = "bf_session";
+const API_BODY_LIMIT = 1024 * 1024;
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const MAX_SYNC_DAYS = 2500;
+const MAX_TOKEN_FIELD = 1_000_000_000_000;
+const MAX_RECORDS_PER_DAY = 1_000_000;
+const MIN_INGEST_DATE = "2020-01-01";
 const RESERVED_HANDLES = new Set([
   "app",
   "signup",
@@ -38,6 +44,7 @@ export default {
     try {
       return await route(request, env);
     } catch (error) {
+      if (error && error.status) return json({ error: error.code || "bad_request" }, error.status);
       console.error(error);
       return json({ error: "internal_error" }, 500);
     }
@@ -47,7 +54,9 @@ export default {
 async function route(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
-  if (path.startsWith("/api/") && tooLarge(request, 1024 * 1024)) return json({ error: "request_too_large" }, 413);
+  if (path.startsWith("/api/") && tooLarge(request, API_BODY_LIMIT)) return json({ error: "request_too_large" }, 413);
+  const originFailure = rejectCrossOrigin(request, path);
+  if (originFailure) return originFailure;
 
   if (path === "/favicon.svg") return assetResponse("pyro.svg");
   if (path === "/favicon.ico") return assetResponse("pyro-512.png");
@@ -88,12 +97,17 @@ async function route(request, env) {
 }
 
 async function signup(request, env) {
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("signup:ip", clientIP(request)), 5, 3600],
+  ]);
+  if (limited) return limited;
+
   const body = await readBody(request);
-  const email = cleanEmail(body.email);
+  if (cleanEmail(body.email)) return json({ error: "email_signup_requires_magic_link" }, 400);
   const rawHandle = body.username || body.handle;
   const handle = cleanHandle(rawHandle);
   if (String(rawHandle || "").trim() && !handle) return json({ error: "invalid_handle" }, 400);
-  const user = await createUser(env, { email, handle });
+  const user = await createUser(env, { email: "", handle });
   if (user.error) return json(user, user.status || 400);
   const machine = await createMachine(env, {
     userID: user.id,
@@ -111,6 +125,11 @@ async function accountLogin(request, env) {
   const accountNumber = String(body.account_number || body.account || "").trim();
   const accountKey = String(body.account_key || body.key || "").trim();
   if (!accountNumber || !accountKey) return json({ error: "missing_account_credentials" }, 400);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("account-login:ip", clientIP(request)), 20, 3600],
+    [await rateKey("account-login:account", accountNumber), 10, 3600],
+  ]);
+  if (limited) return limited;
 
   const row = await env.DB.prepare(`
     SELECT u.id
@@ -136,10 +155,15 @@ async function requestMagicLink(request, env) {
   const body = await readBody(request);
   const email = cleanEmail(body.email);
   if (!email) return json({ error: "invalid_email" }, 400);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("magic:ip", clientIP(request)), 10, 3600],
+    [await rateKey("magic:email", email), 3, 3600],
+  ]);
+  if (limited) return limited;
 
-  let user = await userByEmail(env, email);
+  let user = await userByVerifiedEmail(env, email);
   if (!user) {
-    const created = await createUser(env, { email, handle: "" });
+    const created = await createUser(env, { email: "", handle: "" });
     if (created.error) return json(created, created.status || 400);
     user = { id: created.id };
   }
@@ -147,8 +171,8 @@ async function requestMagicLink(request, env) {
   const token = randomToken("bfl");
   const tokenHash = await sha256(token);
   await env.DB.prepare(`
-    INSERT INTO magic_links (token_hash, user_id, email, expires_at)
-    VALUES (?, ?, ?, datetime('now', '+15 minutes'))
+    INSERT INTO magic_links (token_hash, user_id, email, expires_at, purpose)
+    VALUES (?, ?, ?, datetime('now', '+15 minutes'), 'login')
   `).bind(tokenHash, user.id, email).run();
 
   const origin = new URL(request.url).origin;
@@ -164,22 +188,20 @@ async function attachEmail(request, env) {
   const body = await readBody(request);
   const email = cleanEmail(body.email);
   if (!email) return json({ error: "invalid_email" }, 400);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("email:user", user.id), 10, 3600],
+    [await rateKey("email:email", email), 3, 3600],
+  ]);
+  if (limited) return limited;
 
-  const existing = await userByEmail(env, email);
+  const existing = await userByVerifiedEmail(env, email);
+  if (existing && existing.id === user.id) return json({ ok: true, already_verified: true });
   if (existing && existing.id !== user.id) return json({ error: "email_already_claimed" }, 409);
 
-  await env.DB.batch([
-    env.DB.prepare(`
-      INSERT INTO user_emails (user_id, email, is_primary)
-      VALUES (?, ?, COALESCE((SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM user_emails WHERE user_id = ?), 1))
-      ON CONFLICT(email) DO NOTHING
-    `).bind(user.id, email, user.id),
-    env.DB.prepare("UPDATE users SET email = COALESCE(email, ?) WHERE id = ?").bind(email, user.id),
-  ]);
   const token = randomToken("bfl");
   await env.DB.prepare(`
-    INSERT INTO magic_links (token_hash, user_id, email, expires_at)
-    VALUES (?, ?, ?, datetime('now', '+15 minutes'))
+    INSERT INTO magic_links (token_hash, user_id, email, expires_at, purpose)
+    VALUES (?, ?, ?, datetime('now', '+15 minutes'), 'attach')
   `).bind(await sha256(token), user.id, email).run();
 
   const origin = new URL(request.url).origin;
@@ -204,16 +226,31 @@ async function consumeMagicLink(request, env) {
   if (!token) return html(authResultPage("Missing sign-in token.", false), 400);
   const tokenHash = await sha256(token);
   const row = await env.DB.prepare(`
-    SELECT user_id, email FROM magic_links
+    SELECT user_id, email, COALESCE(purpose, 'login') AS purpose FROM magic_links
     WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > datetime('now')
   `).bind(tokenHash).first();
   if (!row) return html(authResultPage("This sign-in link is expired or already used.", false), 400);
 
-  const sessionToken = await createSession(env, row.user_id);
+  let targetUserID = row.user_id;
+  if (row.purpose === "attach") {
+    const current = await requireUser(request, env);
+    if (!current || current.id !== row.user_id) {
+      return html(authResultPage("Open this email link in the same browser where you requested it.", false), 403);
+    }
+    const existing = await userByVerifiedEmail(env, row.email);
+    if (existing && existing.id !== row.user_id) {
+      await env.DB.prepare("UPDATE magic_links SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE token_hash = ?").bind(tokenHash).run();
+      return html(authResultPage("That email is already attached to another profile.", false), 409);
+    }
+  } else {
+    const existing = await userByVerifiedEmail(env, row.email);
+    if (existing) targetUserID = existing.id;
+  }
+
+  await verifyEmailForUser(env, targetUserID, row.email);
+  const sessionToken = await createSession(env, targetUserID);
   await env.DB.batch([
     env.DB.prepare("UPDATE magic_links SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE token_hash = ?").bind(tokenHash),
-    env.DB.prepare("UPDATE users SET email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?").bind(row.user_id),
-    env.DB.prepare("UPDATE user_emails SET verified_at = COALESCE(verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE user_id = ? AND email = ?").bind(row.user_id, row.email),
   ]);
   return new Response(authResultPage("Signed in. Redirecting to your dashboard.", true), {
     status: 200,
@@ -300,6 +337,10 @@ async function claimHandle(request, env) {
 async function createMachineRoute(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("machines:user", user.id), 20, 3600],
+  ]);
+  if (limited) return limited;
   const body = await readBody(request);
   const scopeRef = String(body.org || body.org_ref || "").trim();
   let org = null;
@@ -321,6 +362,10 @@ async function createMachineRoute(request, env) {
 async function rotateMachineTokenRoute(request, env, machineNumber) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("machine-token:user", user.id), 20, 3600],
+  ]);
+  if (limited) return limited;
   const machine = await env.DB.prepare(`
     SELECT
       m.id,
@@ -352,6 +397,10 @@ async function rotateMachineTokenRoute(request, env, machineNumber) {
 async function createOrgRoute(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("orgs:user", user.id), 10, 3600],
+  ]);
+  if (limited) return limited;
   const body = await readBody(request);
   const rawHandle = body.handle || body.username;
   const handle = cleanHandle(rawHandle);
@@ -365,6 +414,10 @@ async function createOrgRoute(request, env) {
 async function addOrgMemberRoute(request, env, orgRef) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("org-members:user", user.id), 60, 3600],
+  ]);
+  if (limited) return limited;
   const org = await resolveAccount(env, orgRef);
   if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
   const actor = await membershipRole(env, org.id, user.id);
@@ -381,6 +434,10 @@ async function addOrgMemberRoute(request, env, orgRef) {
 async function updateOrgMemberRoute(request, env, orgRef, memberRef) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("org-members:user", user.id), 60, 3600],
+  ]);
+  if (limited) return limited;
   const org = await resolveAccount(env, orgRef);
   if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
   const actor = await membershipRole(env, org.id, user.id);
@@ -400,6 +457,10 @@ async function updateOrgMemberRoute(request, env, orgRef, memberRef) {
 async function removeOrgMemberRoute(request, env, orgRef, memberRef) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("org-members:user", user.id), 60, 3600],
+  ]);
+  if (limited) return limited;
   const org = await resolveAccount(env, orgRef);
   if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
   const actor = await membershipRole(env, org.id, user.id);
@@ -416,19 +477,36 @@ async function removeOrgMemberRoute(request, env, orgRef, memberRef) {
 async function ingest(request, env) {
   const token = bearerToken(request);
   if (!token) return json({ error: "missing_machine_token" }, 401);
-  const machine = await env.DB.prepare("SELECT id, user_id, org_id FROM machines WHERE token_hash = ?").bind(await sha256(token)).first();
+  const tokenHash = await sha256(token);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("ingest:ip", clientIP(request)), 120, 60],
+    [`ingest:token:${tokenHash.slice(0, 32)}`, 120, 60],
+  ]);
+  if (limited) return limited;
+  const machine = await env.DB.prepare("SELECT id, user_id, org_id FROM machines WHERE token_hash = ?").bind(tokenHash).first();
   if (!machine) return json({ error: "invalid_machine_token" }, 401);
   const body = await readBody(request);
   const account = await resolveAccount(env, String(body.profile || ""));
   if (!account || !machineCanSyncToAccount(machine, account)) return json({ error: "profile_machine_mismatch" }, 403);
   const pyroVersion = cleanVersion(body.pyro_version || body.version);
-  const days = Array.isArray(body.days) ? body.days.slice(0, 5000) : [];
+  const days = Array.isArray(body.days) ? body.days : [];
+  if (days.length > MAX_SYNC_DAYS) return json({ error: "too_many_days" }, 400);
   const statements = [];
   for (const day of days) {
     const date = String(day.date_utc || "");
-    if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) continue;
+    if (!validIngestDate(date)) return json({ error: "invalid_date" }, 400);
     const usage = day.usage || {};
-    const total = int(usage.total || day.total_tokens || usage.input + usage.cache_read + usage.cache_write + usage.output);
+    const input = boundedInt(usage.input, MAX_TOKEN_FIELD);
+    const cacheRead = boundedInt(usage.cache_read, MAX_TOKEN_FIELD);
+    const cacheWrite = boundedInt(usage.cache_write, MAX_TOKEN_FIELD);
+    const output = boundedInt(usage.output, MAX_TOKEN_FIELD);
+    const reasoning = boundedInt(usage.reasoning, MAX_TOKEN_FIELD);
+    const explicitTotal = usage.total || day.total_tokens;
+    const total = explicitTotal ? boundedInt(explicitTotal, MAX_TOKEN_FIELD) : boundedInt(input + cacheRead + cacheWrite + output, MAX_TOKEN_FIELD);
+    const records = boundedInt(day.records, MAX_RECORDS_PER_DAY);
+    if ([input, cacheRead, cacheWrite, output, reasoning, total, records].some((value) => value === null)) {
+      return json({ error: "invalid_usage" }, 400);
+    }
     statements.push(env.DB.prepare(`
       INSERT INTO daily_machine_usage
         (machine_id, user_id, date_utc, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, records, updated_at)
@@ -442,7 +520,7 @@ async function ingest(request, env) {
         total_tokens = excluded.total_tokens,
         records = excluded.records,
         updated_at = excluded.updated_at
-    `).bind(machine.id, machine.user_id, date, int(usage.input), int(usage.cache_read), int(usage.cache_write), int(usage.output), int(usage.reasoning), total, int(day.records)));
+    `).bind(machine.id, machine.user_id, date, input, cacheRead, cacheWrite, output, reasoning, total, records));
   }
   if (statements.length) await env.DB.batch(statements);
   await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_pyro_version = ? WHERE id = ?").bind(pyroVersion || null, machine.id).run();
@@ -616,6 +694,37 @@ async function userByEmail(env, email) {
   `).bind(email, email).first();
 }
 
+async function userByVerifiedEmail(env, email) {
+  return env.DB.prepare(`
+    SELECT u.id
+    FROM users u
+    LEFT JOIN user_emails ue ON ue.user_id = u.id
+    WHERE (u.email = ? AND u.email_verified_at IS NOT NULL)
+       OR (ue.email = ? AND ue.verified_at IS NOT NULL)
+    LIMIT 1
+  `).bind(email, email).first();
+}
+
+async function verifyEmailForUser(env, userID, email) {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM user_emails WHERE email = ? AND verified_at IS NULL").bind(email),
+    env.DB.prepare("UPDATE users SET email = NULL WHERE email = ? AND id != ? AND email_verified_at IS NULL").bind(email, userID),
+    env.DB.prepare(`
+      INSERT INTO user_emails (user_id, email, verified_at, is_primary)
+      VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), COALESCE((SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM user_emails WHERE user_id = ?), 1))
+      ON CONFLICT(email) DO UPDATE SET
+        verified_at = CASE WHEN user_emails.user_id = excluded.user_id THEN excluded.verified_at ELSE user_emails.verified_at END,
+        is_primary = CASE WHEN user_emails.user_id = excluded.user_id THEN user_emails.is_primary ELSE user_emails.is_primary END
+    `).bind(userID, email, userID),
+    env.DB.prepare(`
+      UPDATE users
+      SET email = COALESCE(email, ?),
+          email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      WHERE id = ?
+    `).bind(email, userID),
+  ]);
+}
+
 async function membershipRole(env, orgID, userID) {
   const row = await env.DB.prepare("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?").bind(orgID, userID).first();
   return row ? row.role : "";
@@ -666,6 +775,7 @@ async function accountView(env, id) {
 async function resolveAccount(env, ref) {
   ref = String(ref || "").trim().replace(/^@/, "");
   if (!ref) return null;
+  if (ref.length > 80) return null;
   return env.DB.prepare(`
     SELECT a.id, a.account_number, a.kind, a.display_name, a.created_at, h.handle
     FROM accounts a
@@ -677,7 +787,7 @@ async function resolveAccount(env, ref) {
 async function requireUser(request, env) {
   const token = cookieValue(request, COOKIE_NAME);
   if (!token) return null;
-  const row = await env.DB.prepare("SELECT user_id FROM sessions WHERE token_hash = ?").bind(await sha256(token)).first();
+  const row = await env.DB.prepare("SELECT user_id FROM sessions WHERE token_hash = ? AND expires_at > datetime('now')").bind(await sha256(token)).first();
   if (!row) return null;
   return { id: row.user_id };
 }
@@ -688,7 +798,7 @@ async function signedIn(request, env) {
 
 async function createSession(env, userID) {
   const sessionToken = randomToken("bf_session");
-  await env.DB.prepare("INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)").bind(await sha256(sessionToken), userID).run();
+  await env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))").bind(await sha256(sessionToken), userID).run();
   return sessionToken;
 }
 
@@ -990,6 +1100,9 @@ function profileHtml(profile, isSignedIn = false) {
   const svgSnippet = `<img src="https://burnfolio.ai/embed/${name}.svg" alt="Burnfolio token burn graph">`;
   const markdownSnippet = `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg)](https://burnfolio.ai/${name})`;
   const profileURL = `https://burnfolio.ai/${name}`;
+  const shareImagePath = `/og/${encodeURIComponent(name)}.png`;
+  const shareImageURL = `https://burnfolio.ai${shareImagePath}`;
+  const shareText = shareCopy(profile, displayName);
   const description = `${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active days. Show your burn on Burnfolio.`;
   return layout(`${name} on Burnfolio`, `
     <main class="profile">
@@ -999,7 +1112,7 @@ function profileHtml(profile, isSignedIn = false) {
           <h1>${esc(displayName)}</h1>
           <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active days</p>
         </div>
-        <div class="actions"><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
+        <div class="actions"><button class="share-button" type="button" data-share-open data-share-image="${esc(shareImagePath)}" data-share-text="${esc(shareText)}">Share</button><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
       </header>
       <section class="stats">
         ${statCard("Total burn", formatCompact(profile.total_tokens), `${formatInt(profile.total_tokens)} exact`)}
@@ -1010,22 +1123,48 @@ function profileHtml(profile, isSignedIn = false) {
       ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
       ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" })}
       <details class="embed-disclosure">
-        <summary>Embed or share this graph</summary>
+        <summary>Embed this graph</summary>
         <div class="snippets">
           ${snippet("Iframe script", scriptSnippet)}
           ${snippet("Static SVG", svgSnippet)}
           ${snippet("GitHub Markdown", markdownSnippet)}
         </div>
       </details>
+      ${shareDialog(shareImagePath, shareText)}
     </main>
   `, {
     description,
-    image: `https://burnfolio.ai/og/${encodeURIComponent(name)}.png`,
+    image: shareImageURL,
     imageType: "image/png",
     canonical: profileURL,
     siteName: "Burnfolio",
     signedIn: isSignedIn,
   });
+}
+
+function shareCopy(profile, displayName) {
+  const stats = profile.stats;
+  const best = stats.best_day ? ` Best day: ${formatCompact(stats.best_day_tokens)} tokens.` : "";
+  return `${displayName} burned ${formatInt(profile.total_tokens)} AI tokens across ${formatInt(stats.active_days)} active days.${best} Show your burn.`;
+}
+
+function shareDialog(imageURL, text) {
+  return `<div class="share-dialog" data-share-dialog hidden role="dialog" aria-modal="true" aria-labelledby="share-title">
+    <div class="share-backdrop" data-share-close></div>
+    <section class="share-card">
+      <div class="share-card-head">
+        <div><p class="eyebrow">Share card</p><h2 id="share-title">Show your burn</h2></div>
+        <button type="button" class="secondary" data-share-close aria-label="Close share dialog">Close</button>
+      </div>
+      <div class="share-preview"><img src="${esc(imageURL)}" alt="Burnfolio share card" loading="lazy"></div>
+      <div class="share-actions">
+        <button type="button" data-copy-share-image data-share-image="${esc(imageURL)}">Copy image</button>
+        <button type="button" class="secondary" data-copy="${esc(text)}">Copy text</button>
+      </div>
+      <div class="share-text"><span>Suggested text</span><p>${esc(text)}</p></div>
+      <p class="result" data-share-result hidden></p>
+    </section>
+  </div>`;
 }
 
 function embedHtml(profile) {
@@ -1947,15 +2086,70 @@ function orgManagementScript() {
 
 function globalScript() {
   return `
+    function shareStatus(message) {
+      const out = document.querySelector("[data-share-result]");
+      if (!out) return;
+      out.hidden = false;
+      out.textContent = message;
+    }
     document.querySelectorAll("[data-copy]").forEach((button) => {
       button.addEventListener("click", async () => {
         try {
           await navigator.clipboard.writeText(button.dataset.copy || "");
           button.textContent = "Copied";
+          if (button.closest("[data-share-dialog]")) shareStatus("Text copied.");
         } catch {
           button.textContent = "Select";
+          if (button.closest("[data-share-dialog]")) shareStatus("Select the text and copy it manually.");
         }
         setTimeout(() => button.textContent = "Copy", 1200);
+      });
+    });
+    document.querySelectorAll("[data-share-open]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const dialog = document.querySelector("[data-share-dialog]");
+        if (!dialog) return;
+        dialog.hidden = false;
+        document.documentElement.classList.add("share-open");
+        document.body.classList.add("share-open");
+        dialog.querySelector("[data-copy-share-image]")?.focus({ preventScroll: true });
+      });
+    });
+    document.querySelectorAll("[data-share-close]").forEach((button) => {
+      button.addEventListener("click", () => closeShareDialog());
+    });
+    function closeShareDialog() {
+      const dialog = document.querySelector("[data-share-dialog]");
+      if (!dialog) return;
+      dialog.hidden = true;
+      document.documentElement.classList.remove("share-open");
+      document.body.classList.remove("share-open");
+    }
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeShareDialog();
+    });
+    document.querySelectorAll("[data-copy-share-image]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const original = button.textContent;
+        button.disabled = true;
+        button.textContent = "Copying...";
+        try {
+          if (!navigator.clipboard || !window.ClipboardItem) throw new Error("image_clipboard_unavailable");
+          const res = await fetch(button.dataset.shareImage || "", { cache: "no-store" });
+          if (!res.ok) throw new Error("image_fetch_failed");
+          const blob = await res.blob();
+          await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]);
+          button.textContent = "Copied";
+          shareStatus("Image copied. Paste it into your post composer.");
+        } catch {
+          button.textContent = "Open image";
+          shareStatus("Image copy is not available in this browser. Open the card image and copy or save it manually.");
+          window.open(button.dataset.shareImage || "", "_blank", "noopener,noreferrer");
+          return;
+        } finally {
+          button.disabled = false;
+        }
+        setTimeout(() => button.textContent = original, 1400);
       });
     });
     const tip = document.createElement("div");
@@ -1996,9 +2190,26 @@ function globalScript() {
 
 async function readBody(request) {
   const type = request.headers.get("content-type") || "";
-  if (type.includes("application/json")) return request.json();
+  if (type.includes("application/json")) {
+    const raw = await request.text();
+    if (raw.length > API_BODY_LIMIT) throw new HttpError(413, "request_too_large");
+    if (!raw.trim()) return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new HttpError(400, "invalid_json");
+    }
+  }
   if (type.includes("form")) return Object.fromEntries(await request.formData());
   return {};
+}
+
+class HttpError extends Error {
+  constructor(status, code) {
+    super(code);
+    this.status = status;
+    this.code = code;
+  }
 }
 
 function tooLarge(request, maxBytes) {
@@ -2006,6 +2217,52 @@ function tooLarge(request, maxBytes) {
   if (!raw) return false;
   const value = Number(raw);
   return Number.isFinite(value) && value > maxBytes;
+}
+
+function rejectCrossOrigin(request, path) {
+  if (!path.startsWith("/api/")) return null;
+  if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return null;
+  if (path === "/api/ingest") return null;
+  const origin = request.headers.get("Origin");
+  if (!origin) return null;
+  try {
+    if (new URL(origin).origin === new URL(request.url).origin) return null;
+  } catch {
+    return json({ error: "bad_origin" }, 403);
+  }
+  return json({ error: "bad_origin" }, 403);
+}
+
+function clientIP(request) {
+  return (request.headers.get("CF-Connecting-IP") || request.headers.get("x-forwarded-for") || "unknown").split(",")[0].trim() || "unknown";
+}
+
+async function rateKey(prefix, value) {
+  return `${prefix}:${(await sha256(String(value || ""))).slice(0, 32)}`;
+}
+
+async function rateLimitChecks(request, env, checks) {
+  for (const [key, limit, windowSeconds] of checks) {
+    const ok = await hitRateLimit(env, key, limit, windowSeconds);
+    if (!ok) {
+      return json({ error: "rate_limited" }, 429, { "Retry-After": String(windowSeconds) });
+    }
+  }
+  return null;
+}
+
+async function hitRateLimit(env, key, limit, windowSeconds) {
+  const windowStart = Math.floor(Date.now() / 1000 / windowSeconds) * windowSeconds;
+  await env.DB.prepare(`
+    INSERT INTO rate_limits (key, window_start, count, updated_at)
+    VALUES (?, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    ON CONFLICT(key) DO UPDATE SET
+      count = CASE WHEN rate_limits.window_start = excluded.window_start THEN rate_limits.count + 1 ELSE 1 END,
+      window_start = excluded.window_start,
+      updated_at = excluded.updated_at
+  `).bind(key, windowStart).run();
+  const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE key = ?").bind(key).first();
+  return int(row && row.count) <= limit;
 }
 
 function json(data, status = 200, headers = {}) {
@@ -2057,7 +2314,7 @@ function assetResponse(name) {
 }
 
 function cookie(token) {
-  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000`;
+  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}`;
 }
 
 function expiredCookie() {
@@ -2177,6 +2434,23 @@ function cleanText(value, max) {
 function int(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function boundedInt(value, max) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.floor(n);
+  if (!Number.isSafeInteger(rounded) || rounded < 0 || rounded > max) return null;
+  return rounded;
+}
+
+function validIngestDate(value) {
+  if (!String(value || "").match(/^\d{4}-\d{2}-\d{2}$/)) return false;
+  if (value < MIN_INGEST_DATE) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) return false;
+  const tomorrow = new Date(todayUTCDate().getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return value <= tomorrow;
 }
 
 function dayRow(row) {

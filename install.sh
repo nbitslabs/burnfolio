@@ -194,12 +194,24 @@ fi
 
 asset="pyro_${version}_${os}_${arch}.tar.gz"
 url="https://github.com/${repo}/releases/download/${version}/${asset}"
+checksums_url="https://github.com/${repo}/releases/download/${version}/checksums.txt"
 tmp="$(mktemp -d)"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 
 echo "Installing pyro ${version} for ${os}/${arch}"
 curl -fL "$url" -o "${tmp}/${asset}"
+curl -fL "$checksums_url" -o "${tmp}/checksums.txt"
+expected="$(awk -v asset="$asset" '$2 == asset { print $1 }' "${tmp}/checksums.txt" | head -n 1)"
+[ -n "$expected" ] || die "checksum for ${asset} not found in release"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "${tmp}/${asset}" | awk '{ print $1 }')"
+elif command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "${tmp}/${asset}" | awk '{ print $1 }')"
+else
+  die "missing required command: sha256sum or shasum"
+fi
+[ "$actual" = "$expected" ] || die "checksum verification failed for ${asset}"
 tar -xzf "${tmp}/${asset}" -C "$tmp"
 
 mkdir -p "$install_dir"
