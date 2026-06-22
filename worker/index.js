@@ -533,7 +533,9 @@ function installCommand(profile, machine) {
 
 function profileHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
-  const displayName = profile.account.handle ? profile.account.handle : profile.account.kind === "org" ? (profile.account.display_name || profile.account.account_number) : "Anonymous builder";
+  const hasHandle = Boolean(profile.account.handle);
+  const hasLabel = Boolean(profile.account.display_name && profile.account.display_name !== "Anonymous builder" && profile.account.display_name !== profile.account.account_number);
+  const displayName = hasHandle ? profile.account.handle : hasLabel ? profile.account.display_name : profile.account.account_number;
   const stats = profile.stats;
   const scriptSnippet = `<script src="https://burnfolio.ai/embed/${name}/script.js"></script>`;
   const svgSnippet = `<img src="https://burnfolio.ai/embed/${name}.svg" alt="Burnfolio token burn graph">`;
@@ -543,11 +545,11 @@ function profileHtml(profile) {
     <main class="profile">
       <header class="profile-head">
         <div>
-          <div class="badges"><span>${esc(profile.account.kind)} profile</span><span>${esc(profile.account.account_number)}</span>${profile.account.display_name && profile.account.display_name !== displayName ? `<span>${esc(profile.account.display_name)}</span>` : ""}</div>
+          <div class="badges"><span>${esc(profile.account.kind)} profile</span>${hasHandle || hasLabel ? "" : `<span>anonymous</span>`}</div>
           <h1>${esc(displayName)}</h1>
           <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active UTC days</p>
         </div>
-        <div class="actions"><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button><button class="secondary" data-copy="${esc(markdownSnippet)}">Copy Markdown</button><a class="button secondary" href="${profile.embed_url}">Embed</a></div>
+        <div class="actions"><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
       </header>
       <section class="stats">
         ${statCard("Total burn", formatCompact(profile.total_tokens), `${formatInt(profile.total_tokens)} exact`)}
@@ -557,14 +559,14 @@ function profileHtml(profile) {
       </section>
       ${heatmap(profile.days, { title: "Last 365 days", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
       ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "UTC days, grouped by calendar year" })}
-      <section class="panel">
-        <div class="section-head"><div><h2>Embed this graph</h2><p class="muted">Use the Markdown snippet for GitHub READMEs and profile pages.</p></div></div>
+      <details class="embed-disclosure">
+        <summary>Embed or share this graph</summary>
         <div class="snippets">
           ${snippet("Iframe script", scriptSnippet)}
           ${snippet("Static SVG", svgSnippet)}
           ${snippet("GitHub Markdown", markdownSnippet)}
         </div>
-      </section>
+      </details>
     </main>
   `);
 }
@@ -619,11 +621,12 @@ function layout(title, body) {
 }
 
 function heatmap(days, options = {}) {
-  const cells = heatmapCellData(days, options.span || 365).map((cell) => heatmapCell(cell));
+  const data = heatmapCellData(days, options.span || 365);
+  const cells = data.map((cell) => heatmapCell(cell));
   const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
   return `<section class="${classes}">
     ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
-    <div class="heatmap-scroll"><div class="heatmap" aria-label="Token burn by UTC day">${cells.join("")}</div></div>
+    <div class="heatmap-scroll">${heatmapFrame(data, cells.join(""), "Token burn by UTC day")}</div>
   </section>`;
 }
 
@@ -645,9 +648,10 @@ function heatmapTimeline(days, options = {}) {
   return `<section class="graph timeline">
     <div class="graph-head"><div><h2>${esc(options.title || "Token burn timeline")}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>
     <div class="timeline-years">${years.map((year) => {
-      const cells = yearHeatmapCellData(days, year).map((cell) => heatmapCell(cell)).join("");
+      const data = yearHeatmapCellData(days, year);
+      const cells = data.map((cell) => heatmapCell(cell)).join("");
       const total = days.filter((day) => day.date_utc.startsWith(String(year))).reduce((sum, day) => sum + day.total_tokens, 0);
-      return `<section class="year-row"><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll"><div class="heatmap year-heatmap" aria-label="Token burn by UTC day in ${year}">${cells}</div></div></section>`;
+      return `<section class="year-row"><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll">${heatmapFrame(data, cells, `Token burn by UTC day in ${year}`, "year-heatmap")}</div></section>`;
     }).join("")}</div>
   </section>`;
 }
@@ -688,6 +692,33 @@ function heatmapCell(cell) {
   if (cell.empty) return `<span class="cell empty" aria-hidden="true"></span>`;
   const tip = `${cell.date}: ${formatInt(cell.value)} tokens`;
   return `<span title="${esc(tip)}" data-tip="${esc(tip)}" class="cell l${cell.level}" role="img" aria-label="${esc(tip)}"></span>`;
+}
+
+function heatmapFrame(data, cells, label, extraClass = "") {
+  const months = monthLabels(data);
+  const frameClass = ["heatmap-frame", extraClass ? `${extraClass}-frame` : ""].filter(Boolean).join(" ");
+  return `<div class="${frameClass}">
+    <div class="month-labels" aria-hidden="true">${months.map((month) => `<span style="grid-column:${month.column}">${esc(month.label)}</span>`).join("")}</div>
+    <div class="weekday-labels" aria-hidden="true"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>
+    <div class="heatmap ${extraClass}" aria-label="${esc(label)}">${cells}</div>
+  </div>`;
+}
+
+function monthLabels(data) {
+  const labels = [];
+  let seen = "";
+  for (let i = 0; i < data.length; i++) {
+    const cell = data[i];
+    if (!cell.date) continue;
+    const d = new Date(`${cell.date}T00:00:00Z`);
+    if (Number.isNaN(d.getTime()) || d.getUTCDate() !== 1) continue;
+    const month = d.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
+    const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+    if (key === seen) continue;
+    seen = key;
+    labels.push({ label: month, column: Math.floor(i / 7) + 1 });
+  }
+  return labels;
 }
 
 function legend() {
