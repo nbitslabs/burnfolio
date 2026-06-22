@@ -51,6 +51,9 @@ func TestSyncReportPostsDailyTotals(t *testing.T) {
 	if gotPayload.Profile != "bf_profile" {
 		t.Fatalf("profile = %q", gotPayload.Profile)
 	}
+	if gotPayload.PyroVersion == "" {
+		t.Fatal("pyro version was not sent")
+	}
 	if len(gotPayload.Days) != 2 {
 		t.Fatalf("days = %d, want 2: %#v", len(gotPayload.Days), gotPayload.Days)
 	}

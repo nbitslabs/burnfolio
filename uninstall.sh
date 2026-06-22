@@ -5,6 +5,7 @@ install_dir="${PYRO_INSTALL_DIR:-}"
 profile=""
 keep_binary=0
 keep_cron=0
+remove_binary=0
 yes=0
 
 usage() {
@@ -17,7 +18,8 @@ Usage:
 Options:
   --install-dir <dir>  Directory containing pyro. Defaults to /usr/local/bin, ~/.local/bin, then PATH.
   --profile <profile>  Remove cron entries only for this profile.
-  --keep-binary        Leave the pyro binary installed.
+  --keep-binary        Deprecated no-op; the binary is kept by default.
+  --remove-binary      Also remove the pyro binary from the install directory.
   --keep-cron          Leave Burnfolio cron entries installed.
   -y, --yes            Do not prompt before uninstalling.
   -h, --help           Show this help.
@@ -41,6 +43,8 @@ while [ "$#" -gt 0 ]; do
       profile="${1#*=}"; shift ;;
     --keep-binary)
       keep_binary=1; shift ;;
+    --remove-binary)
+      remove_binary=1; shift ;;
     --keep-cron)
       keep_cron=1; shift ;;
     -y|--yes)
@@ -53,12 +57,19 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$yes" != "1" ] && [ -r /dev/tty ]; then
-  printf "Remove pyro and Burnfolio cron sync entries? [y/N] " > /dev/tty
+  printf "Disable Burnfolio cron sync and mark pyro uninstalled? [y/N] " > /dev/tty
   IFS= read -r answer < /dev/tty || answer=""
   case "$answer" in
     y|Y|yes|YES) ;;
     *) echo "Cancelled."; exit 0 ;;
   esac
+fi
+
+if command -v pyro >/dev/null 2>&1; then
+  args=(uninstall)
+  [ -n "$profile" ] && args+=(--profile "$profile")
+  [ "$keep_cron" = "1" ] && args+=(--keep-cron)
+  pyro "${args[@]}" || true
 fi
 
 if [ "$keep_cron" != "1" ] && command -v crontab >/dev/null 2>&1; then
@@ -72,7 +83,7 @@ if [ "$keep_cron" != "1" ] && command -v crontab >/dev/null 2>&1; then
   echo "Removed Burnfolio cron sync entries."
 fi
 
-if [ "$keep_binary" != "1" ]; then
+if [ "$remove_binary" = "1" ] && [ "$keep_binary" != "1" ]; then
   candidates=()
   if [ -n "$install_dir" ]; then
     candidates+=("${install_dir}/pyro")

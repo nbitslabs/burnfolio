@@ -47,6 +47,7 @@ export default {
 async function route(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
+  if (path.startsWith("/api/") && tooLarge(request, 1024 * 1024)) return json({ error: "request_too_large" }, 413);
 
   if (path === "/favicon.svg") return assetResponse("pyro.svg");
   if (path === "/favicon.ico") return assetResponse("pyro-512.png");
@@ -55,7 +56,7 @@ async function route(request, env) {
   if (path === "/og/landing.png") return assetResponse("og-landing.png");
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
-  if (path === "/") return html(homePage(await signedIn(request, env)));
+  if (path === "/") return html(homePage(await signedIn(request, env), await globalStats(request, env)));
   if (path === "/signup") return authRoute(request, env, "signup");
   if (path === "/signin") return authRoute(request, env, "signin");
   if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
@@ -68,6 +69,7 @@ async function route(request, env) {
   if (path === "/api/email" && request.method === "POST") return attachEmail(request, env);
   if (path === "/api/logout" && request.method === "POST") return logout(request, env);
   if (path === "/api/me") return me(request, env);
+  if (path === "/api/global/stats" && (request.method === "GET" || request.method === "HEAD")) return globalStatsResponse(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/machines" && request.method === "POST") return createMachineRoute(request, env);
   if (path.match(/^\/api\/machines\/[^/]+\/token$/) && request.method === "POST") return rotateMachineTokenRoute(request, env, decodeURIComponent(path.split("/")[3]));
@@ -238,6 +240,44 @@ async function me(request, env) {
   return json({ account: await accountView(env, user.id), machines: machines.results, orgs: orgs.results });
 }
 
+async function globalStats(request, env) {
+  return readGlobalStats(env);
+}
+
+async function globalStatsResponse(request, env) {
+  const data = await readGlobalStats(env);
+  return json(data, 200, { "Cache-Control": "no-store" });
+}
+
+async function readGlobalStats(env) {
+  const today = todayUTCDate();
+  const first = sameDatePreviousYear(today);
+  const gridStart = startOfWeekUTC(first);
+  const start = gridStart.toISOString().slice(0, 10);
+  const end = today.toISOString().slice(0, 10);
+  const rows = await env.DB.prepare(`
+    SELECT date_utc, total_tokens
+    FROM global_daily_usage
+    WHERE date_utc BETWEEN ? AND ?
+    ORDER BY date_utc
+  `).bind(start, end).all();
+  const total = await env.DB.prepare("SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens FROM global_daily_usage").first();
+  let lastYearTokens = 0;
+  for (const row of rows.results || []) {
+    if (row.date_utc >= first.toISOString().slice(0, 10)) lastYearTokens += int(row.total_tokens);
+  }
+  return {
+    days: (rows.results || []).map(dayRow),
+    total_tokens: int(total && total.total_tokens),
+    last_year_tokens: lastYearTokens,
+    generated_at: new Date().toISOString(),
+  };
+}
+
+function emptyGlobalStats() {
+  return { days: [], total_tokens: 0, last_year_tokens: 0 };
+}
+
 async function claimHandle(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
@@ -381,6 +421,7 @@ async function ingest(request, env) {
   const body = await readBody(request);
   const account = await resolveAccount(env, String(body.profile || ""));
   if (!account || !machineCanSyncToAccount(machine, account)) return json({ error: "profile_machine_mismatch" }, 403);
+  const pyroVersion = cleanVersion(body.pyro_version || body.version);
   const days = Array.isArray(body.days) ? body.days.slice(0, 5000) : [];
   const statements = [];
   for (const day of days) {
@@ -404,7 +445,7 @@ async function ingest(request, env) {
     `).bind(machine.id, machine.user_id, date, int(usage.input), int(usage.cache_read), int(usage.cache_write), int(usage.output), int(usage.reasoning), total, int(day.records)));
   }
   if (statements.length) await env.DB.batch(statements);
-  await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(machine.id).run();
+  await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_pyro_version = ? WHERE id = ?").bind(pyroVersion || null, machine.id).run();
   return json({ ok: true, upserted_days: statements.length });
 }
 
@@ -660,7 +701,9 @@ async function uniqueAccountNumber(env) {
   throw new Error("account_number_exhausted");
 }
 
-function homePage(isSignedIn = false) {
+function homePage(isSignedIn = false, global = emptyGlobalStats()) {
+  const globalTotal = formatCompact(global.total_tokens);
+  const globalSubtitle = `${formatInt(global.last_year_tokens)} tokens burned globally`;
   return layout("Burnfolio — Show your burn", `
     <main class="landing">
       <section class="hero">
@@ -677,9 +720,9 @@ function homePage(isSignedIn = false) {
         </div>
         <section class="showcase">
           <div class="showcase-top">
-            <div><span>Public burn graph</span><strong>8.4B tokens burned</strong></div>
+            <div><span>Global burn graph</span><strong>${esc(globalTotal)} tokens burned</strong></div>
           </div>
-          ${heatmap(demoDays(), { title: "Past year", subtitle: "Burn graph" })}
+          ${heatmap(global.days, { title: "Past year", subtitle: globalSubtitle })}
           <div class="steps">
             <span>Create a profile</span>
             <span>Run <code>pyro</code></span>
@@ -802,7 +845,7 @@ async function appPage(request, env) {
           <div class="list">${machines.results.map((machine) => machineRow(machine, profileRef)).join("") || emptyState("No machines connected", "Create a token and sync with pyro to start filling your burn graph.")}</div>
           <details class="utility-disclosure">
             <summary>Uninstall pyro</summary>
-            <p class="muted">This removes the local binary and any Burnfolio cron sync entries.</p>
+            <p class="muted">This disables Burnfolio cron sync and marks pyro uninstalled while leaving local <code>~/.pyro</code> state in place.</p>
             <div class="snippet"><div><span>Uninstall command</span><button type="button" class="secondary copy" data-copy="${esc(uninstallCommand())}">Copy</button></div><code>${esc(uninstallCommand())}</code></div>
           </details>
         </section>
@@ -1902,21 +1945,6 @@ function orgManagementScript() {
   `;
 }
 
-function demoDays() {
-  const today = new Date();
-  const days = [];
-  for (let i = 364; i >= 0; i--) {
-    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
-    const weekday = d.getUTCDay();
-    const pulse = ((i * 37) + (weekday * 19)) % 101;
-    const isWorkingDay = weekday > 0 && weekday < 6;
-    const active = isWorkingDay ? pulse > 17 : pulse > 72;
-    const total = active ? Math.round((pulse ** 2.35) * 8200 + (weekday + 1) * 180000) : 0;
-    days.push({ date_utc: d.toISOString().slice(0, 10), total_tokens: total });
-  }
-  return days;
-}
-
 function globalScript() {
   return `
     document.querySelectorAll("[data-copy]").forEach((button) => {
@@ -1971,6 +1999,13 @@ async function readBody(request) {
   if (type.includes("application/json")) return request.json();
   if (type.includes("form")) return Object.fromEntries(await request.formData());
   return {};
+}
+
+function tooLarge(request, maxBytes) {
+  const raw = request.headers.get("content-length");
+  if (!raw) return false;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > maxBytes;
 }
 
 function json(data, status = 200, headers = {}) {
@@ -2069,6 +2104,12 @@ function cleanHandle(value) {
 function cleanEmail(value) {
   value = String(value || "").trim().toLowerCase();
   return value && value.includes("@") ? value : "";
+}
+
+function cleanVersion(value) {
+  value = String(value || "").trim();
+  if (!value || value.length > 40) return "";
+  return value.match(/^v?[0-9][0-9A-Za-z._+-]{0,39}$/) ? value : "";
 }
 
 async function sendMagicEmail(env, to, link) {

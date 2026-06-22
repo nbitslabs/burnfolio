@@ -223,22 +223,22 @@ if [ -z "$profile" ] || [ -z "$machine" ]; then
   prompt_existing_token
 fi
 
-sync_cmd="$(shell_quote "$pyro_path") --providers $(shell_quote "$providers")"
-if [ -n "$profile" ]; then
-  sync_cmd="${sync_cmd} --profile $(shell_quote "$profile") --machine $(shell_quote "$machine") --server $(shell_quote "$server")"
+if [ -n "$profile" ] && [ -z "$schedule" ]; then
+  schedule="$(prompt_schedule)"
 fi
+
+install_args=(install --providers "$providers" --server "$server" --install-dir "$install_dir")
+if [ -n "$profile" ]; then
+  install_args+=(--profile "$profile" --machine "$machine")
+fi
+if [ -n "$schedule" ]; then
+  install_args+=(--schedule "$schedule")
+fi
+"$pyro_path" "${install_args[@]}"
 
 if [ "$run_sync" = "1" ]; then
   echo "Running initial sync..."
-  sync_args=(--providers "$providers" --server "$server")
-  if [ -n "$profile" ]; then
-    sync_args+=(--profile "$profile" --machine "$machine")
-  fi
-  "$pyro_path" "${sync_args[@]}"
-fi
-
-if [ -n "$profile" ] && [ -z "$schedule" ]; then
-  schedule="$(prompt_schedule)"
+  "$pyro_path"
 fi
 
 if [ -n "$profile" ] && [ "$schedule" != "" ] && [ "$schedule" != "none" ]; then
@@ -248,6 +248,7 @@ if [ -n "$profile" ] && [ "$schedule" != "" ] && [ "$schedule" != "none" ]; then
     daily) cron_time="17 3 * * *" ;;
   esac
   cron_marker="# burnfolio-pyro ${profile}"
+  sync_cmd="$(shell_quote "$pyro_path")"
   cron_line="${cron_time} ${sync_cmd} >/tmp/burnfolio-pyro.log 2>&1 ${cron_marker}"
   current="$(crontab -l 2>/dev/null | grep -vF "$cron_marker" || true)"
   printf '%s\n%s\n' "$current" "$cron_line" | sed '/^$/d' | crontab -

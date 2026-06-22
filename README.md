@@ -29,7 +29,8 @@ Release assets are available at
 `https://github.com/nbitslabs/burnfolio/releases`.
 
 The installer downloads the latest release binary, installs it to
-`/usr/local/bin` or `~/.local/bin`, and can optionally run an immediate sync.
+`/usr/local/bin` or `~/.local/bin`, writes `~/.pyro/config.json`, and can
+optionally run an immediate sync.
 If you already have a Burnfolio machine token, you can either pass it with
 `--profile` and `--machine` or let the interactive installer prompt for it.
 
@@ -65,7 +66,9 @@ Useful installer flags:
 --version v0.1.0
 ```
 
-Uninstall pyro and remove Burnfolio cron sync entries:
+Uninstall disables Burnfolio cron sync and marks the local install as
+uninstalled in `~/.pyro/config.json`. It leaves the `.pyro` folder and saved
+machine config in place so you can reinstall or inspect status later:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/uninstall.sh | bash
@@ -76,14 +79,21 @@ Useful uninstaller flags:
 ```sh
 --profile <account-or-username>
 --install-dir ~/.local/bin
---keep-binary
+--remove-binary
 --keep-cron
 --yes
 ```
 
 ## CLI Usage
 
-Run a local summary without syncing:
+Show local install state:
+
+```sh
+pyro status
+```
+
+Run a local summary and automatically sync when `~/.pyro/config.json` has an
+active profile and machine token:
 
 ```sh
 pyro
@@ -94,8 +104,11 @@ Useful CLI flags:
 ```sh
 pyro --providers claude,codex
 pyro --json
+pyro --no-sync
 pyro --home /path/to/home
 pyro --profile bf_ab12cd34 --machine bfm_...
+pyro install --profile bf_ab12cd34 --machine bfm_...
+pyro uninstall
 ```
 
 Build from source for local development:
