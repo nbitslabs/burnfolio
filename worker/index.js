@@ -672,12 +672,13 @@ function profileHtml(profile) {
 
 function embedHtml(profile) {
   const name = profile.account.handle || profile.account.account_number;
-  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days` })}</div><script>${globalScript()}</script>`;
+  const scale = heatmapScale(profile.days);
+  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days`, scale })}</div><script>${globalScript()}</script>`;
 }
 
 function svgEmbed(profile) {
   const name = profile.account.handle || profile.account.account_number;
-  const cells = heatmapCellData(profile.days);
+  const cells = heatmapCellData(profile.days, 365, heatmapScale(profile.days));
   const cellSize = 10;
   const gap = 4;
   const left = 22;
@@ -720,7 +721,8 @@ function layout(title, body) {
 }
 
 function heatmap(days, options = {}) {
-  const data = heatmapCellData(days, options.span || 365);
+  const scale = options.scale || heatmapScale(days);
+  const data = heatmapCellData(days, options.span || 365, scale);
   const cells = data.map((cell) => heatmapCell(cell));
   const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
   return `<section class="${classes}">
@@ -729,7 +731,7 @@ function heatmap(days, options = {}) {
   </section>`;
 }
 
-function heatmapCellData(days, span = 365) {
+function heatmapCellData(days, span = 365, scale = heatmapScale(days)) {
   const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
   const today = new Date();
   const cells = [];
@@ -737,17 +739,18 @@ function heatmapCellData(days, span = 365) {
     const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
     const date = d.toISOString().slice(0, 10);
     const value = byDate.get(date) || 0;
-    cells.push({ date, value, level: level(value) });
+    cells.push({ date, value, level: level(value, scale) });
   }
   return cells;
 }
 
 function heatmapTimeline(days, options = {}) {
   const years = heatmapYears(days);
+  const scale = options.scale || heatmapScale(days);
   return `<section class="graph timeline">
     <div class="graph-head"><div><h2>${esc(options.title || "Token burn timeline")}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>
     <div class="timeline-years">${years.map((year) => {
-      const data = yearHeatmapCellData(days, year);
+      const data = yearHeatmapCellData(days, year, scale);
       const cells = data.map((cell) => heatmapCell(cell)).join("");
       const total = days.filter((day) => day.date_utc.startsWith(String(year))).reduce((sum, day) => sum + day.total_tokens, 0);
       return `<section class="year-row"><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll">${heatmapFrame(data, cells, `Token burn by day in ${year}`, "year-heatmap")}</div></section>`;
@@ -767,7 +770,7 @@ function heatmapYears(days) {
   return years;
 }
 
-function yearHeatmapCellData(days, year) {
+function yearHeatmapCellData(days, year, scale = heatmapScale(days)) {
   const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
   const cells = [];
   const today = new Date();
@@ -779,7 +782,7 @@ function yearHeatmapCellData(days, year) {
   for (let d = new Date(first); d <= last; d.setUTCDate(d.getUTCDate() + 1)) {
     const date = d.toISOString().slice(0, 10);
     const value = byDate.get(date) || 0;
-    cells.push({ date, value, level: level(value) });
+    cells.push({ date, value, level: level(value, scale) });
   }
   if (year !== todayUTC.getUTCFullYear()) {
     while (cells.length % 7 !== 0) cells.push({ empty: true });
@@ -893,11 +896,21 @@ function profileStats(days, total) {
   };
 }
 
-function level(value) {
+function heatmapScale(days) {
+  const values = days.map((day) => int(day.total_tokens)).filter((value) => value > 0).sort((a, b) => a - b);
+  if (!values.length) return { min: 0, max: 0 };
+  return { min: values[0], max: values[values.length - 1] };
+}
+
+function level(value, scale = null) {
   if (value <= 0) return 0;
-  if (value < 100000) return 1;
-  if (value < 1000000) return 2;
-  if (value < 10000000) return 3;
+  const min = int(scale && scale.min);
+  const max = int(scale && scale.max);
+  if (max <= min) return 4;
+  const ratio = (value - min) / (max - min);
+  if (ratio <= 0.25) return 1;
+  if (ratio <= 0.5) return 2;
+  if (ratio <= 0.75) return 3;
   return 4;
 }
 
