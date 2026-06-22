@@ -1,17 +1,39 @@
 :root {
-  color-scheme: dark;
-  --bg: #07090d;
-  --ink: #f3f7ff;
-  --muted: #a8b2c1;
-  --line: #263241;
-  --panel: rgba(13, 18, 25, .84);
-  --panel-strong: rgba(10, 15, 22, .94);
-  --lime: #d8ff63;
-  --green: #76d45c;
-  --cyan: #66e1ff;
-  --gold: #ffd166;
-  --shadow: 0 28px 90px rgba(0, 0, 0, .34);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color-scheme: light;
+  --burnfolio-flame: #F2611C;
+  --burnfolio-ember: #A83505;
+  --burnfolio-blaze: #D6300B;
+  --burnfolio-glow: #FFC23D;
+  --burnfolio-ink: #211405;
+  --burnfolio-ash: #6F5F4D;
+  --burnfolio-paper: #FFF9F2;
+  --burnfolio-linen: #FFFCF7;
+  --burnfolio-wash: #FBEFE0;
+  --burnfolio-line: #EEDDCB;
+  --burnfolio-coal: #1C140D;
+  --burnfolio-soot: #261B11;
+  --burnfolio-chalk: #FBF1E6;
+  --burnfolio-ash-dark: #BBA68E;
+  --burnfolio-line-dark: #3A2A1B;
+  --burnfolio-flame-bright: #FF8A3D;
+  --burnfolio-heat-0: #F2E7D9;
+  --burnfolio-heat-1: #FBD089;
+  --burnfolio-heat-2: #F99B3C;
+  --burnfolio-heat-3: #F2611C;
+  --burnfolio-heat-4: #D6300B;
+  --burnfolio-r-cell: 2px;
+  --bg: var(--burnfolio-paper);
+  --ink: var(--burnfolio-ink);
+  --muted: var(--burnfolio-ash);
+  --line: var(--burnfolio-line);
+  --panel: var(--burnfolio-linen);
+  --panel-strong: var(--burnfolio-linen);
+  --lime: var(--burnfolio-flame);
+  --green: var(--burnfolio-ember);
+  --cyan: var(--burnfolio-glow);
+  --gold: var(--burnfolio-glow);
+  --shadow: 0 8px 28px rgba(33, 20, 5, .10);
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--ink);
 }
@@ -23,9 +45,9 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   background:
-    radial-gradient(circle at 74% 24%, rgba(216, 255, 99, .16), transparent 28%),
-    radial-gradient(circle at 42% 8%, rgba(102, 225, 255, .12), transparent 30%),
-    linear-gradient(135deg, #05070b 0%, #0b1020 45%, #10140d 100%);
+    radial-gradient(60rem 40rem at 86% -8%, rgba(255, 194, 61, .20), transparent 60%),
+    radial-gradient(50rem 36rem at -6% 4%, rgba(242, 97, 28, .10), transparent 55%),
+    var(--burnfolio-paper);
 }
 body:before {
   content: "";
@@ -34,11 +56,10 @@ body:before {
   z-index: -2;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(102, 225, 255, .085) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(216, 255, 99, .065) 1px, transparent 1px),
-    linear-gradient(125deg, transparent 0 48%, rgba(255, 209, 102, .12) 49%, transparent 51%);
-  background-size: 44px 44px, 44px 44px, 220px 220px;
-  mask-image: radial-gradient(circle at 62% 28%, #000, transparent 72%);
+    linear-gradient(rgba(168, 53, 5, .045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(168, 53, 5, .035) 1px, transparent 1px);
+  background-size: 44px 44px, 44px 44px;
+  mask-image: radial-gradient(circle at 60% 20%, #000, transparent 70%);
 }
 body:after {
   content: "";
@@ -46,7 +67,7 @@ body:after {
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  background: linear-gradient(180deg, transparent 0 55%, rgba(7, 9, 13, .76));
+  background: linear-gradient(180deg, transparent 0 62%, rgba(255, 249, 242, .74));
 }
 
 nav {
@@ -55,24 +76,34 @@ nav {
   align-items: center;
   justify-content: space-between;
   padding: 0 28px;
-  border-bottom: 1px solid rgba(124, 150, 180, .18);
-  background: rgba(5, 7, 11, .72);
-  backdrop-filter: blur(18px);
+  border-bottom: 1px solid var(--burnfolio-line);
+  background: rgba(255, 249, 242, .84);
+  backdrop-filter: blur(14px);
   position: sticky;
   top: 0;
   z-index: 10;
 }
 nav a:first-child { font-weight: 900; color: var(--ink); }
-a { color: var(--lime); text-decoration: none; }
+.nav-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
+  font-size: 20px;
+  font-weight: 800;
+}
+.nav-brand img { width: 28px; height: 28px; }
+a { color: var(--burnfolio-ember); text-decoration: none; }
 
 button,
 .button {
   border: 0;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--lime), #8dff82);
-  color: #11160c;
+  border-radius: 999px;
+  background: var(--burnfolio-flame);
+  color: var(--burnfolio-ink);
   padding: 11px 14px;
-  font-weight: 850;
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  font-weight: 700;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -80,15 +111,15 @@ button,
   min-height: 42px;
 }
 .secondary {
-  background: rgba(31, 43, 34, .88);
-  color: #e6ffad;
-  border: 1px solid rgba(216, 255, 99, .24);
+  background: var(--burnfolio-linen);
+  color: var(--burnfolio-ink);
+  border: 1px solid var(--burnfolio-line);
 }
 input,
 select {
-  border: 1px solid rgba(126, 146, 171, .32);
-  background: rgba(7, 11, 17, .88);
-  color: #f5f7fb;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-linen);
+  color: var(--burnfolio-ink);
   border-radius: 8px;
   padding: 12px 13px;
   min-width: 0;
@@ -97,14 +128,14 @@ a:focus-visible,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
-  outline: 2px solid var(--lime);
+  outline: 2px solid var(--burnfolio-flame);
   outline-offset: 3px;
 }
 code,
 pre {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  background: rgba(8, 13, 20, .9);
-  border: 1px solid rgba(104, 128, 158, .28);
+  font-family: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--burnfolio-wash);
+  border: 1px solid var(--burnfolio-line);
   border-radius: 8px;
   padding: 10px;
   overflow: auto;
@@ -141,29 +172,31 @@ pre {
 }
 .hero-copy { min-width: 0; }
 .eyebrow {
-  color: #c5d7ac;
+  color: var(--burnfolio-ember);
   text-transform: uppercase;
-  letter-spacing: 0;
+  letter-spacing: .14em;
   font-size: 12px;
   font-weight: 900;
+  font-family: "Space Mono", ui-monospace, monospace;
   overflow-wrap: anywhere;
 }
 .hero h1 {
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
   font-size: clamp(48px, 5.7vw, 76px);
-  line-height: .96;
+  line-height: 1.02;
   margin: 12px 0 22px;
-  letter-spacing: 0;
+  letter-spacing: -.035em;
   max-width: 780px;
   text-wrap: balance;
-  background: linear-gradient(90deg, #fff 0%, #d8ff63 46%, #66e1ff 100%);
+  background: linear-gradient(90deg, var(--burnfolio-ink) 0%, var(--burnfolio-ember) 54%, var(--burnfolio-flame) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
 .lede {
   font-size: 19px;
-  line-height: 1.32;
-  color: #cad4e2;
+  line-height: 1.45;
+  color: var(--burnfolio-ash);
   max-width: 640px;
 }
 .signup,
@@ -178,11 +211,11 @@ form {
 .preview {
   min-width: 0;
   padding: 24px;
-  border: 1px solid rgba(216, 255, 99, .2);
+  border: 1px solid var(--burnfolio-line);
   background:
-    linear-gradient(145deg, rgba(14, 24, 18, .9), rgba(7, 11, 17, .92)),
-    radial-gradient(circle at 78% 18%, rgba(216, 255, 99, .16), transparent 32%);
-  border-radius: 8px;
+    radial-gradient(circle at 82% 10%, rgba(255, 194, 61, .24), transparent 36%),
+    var(--burnfolio-linen);
+  border-radius: 18px;
   box-shadow: var(--shadow);
 }
 .preview .graph {
@@ -200,17 +233,19 @@ form {
 .snippet span,
 .stats span {
   display: block;
-  color: #aeb9c7;
+  color: var(--burnfolio-ash);
   font-size: 12px;
   text-transform: uppercase;
   font-weight: 900;
+  font-family: "Space Mono", ui-monospace, monospace;
 }
 .preview-top strong {
   display: block;
   margin-top: 4px;
   font-size: clamp(24px, 3vw, 42px);
   line-height: 1;
-  color: var(--ink);
+  color: var(--burnfolio-blaze);
+  font-family: "Space Mono", ui-monospace, monospace;
 }
 .preview-top a {
   display: inline-flex;
@@ -218,9 +253,9 @@ form {
   justify-content: center;
   min-height: 34px;
   padding: 6px 10px;
-  border: 1px solid rgba(216, 255, 99, .24);
-  border-radius: 8px;
-  background: rgba(31, 43, 34, .66);
+  border: 1px solid var(--burnfolio-line);
+  border-radius: 999px;
+  background: var(--burnfolio-wash);
   font-weight: 800;
 }
 .steps {
@@ -230,18 +265,18 @@ form {
   margin-top: 16px;
 }
 .steps span {
-  border: 1px solid rgba(111, 133, 162, .24);
-  background: rgba(8, 13, 20, .55);
-  border-radius: 8px;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-wash);
+  border-radius: 12px;
   padding: 10px;
-  color: #c7d0de;
+  color: var(--burnfolio-ash);
   font-size: 13px;
 }
 .steps code {
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--lime);
+  color: var(--burnfolio-ember);
 }
 .auth-panel {
   max-width: 1180px;
@@ -249,15 +284,16 @@ form {
   padding: 0 32px;
 }
 .auth-panel details {
-  border: 1px solid rgba(111, 133, 162, .22);
-  background: rgba(7, 11, 17, .66);
-  border-radius: 8px;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-linen);
+  border-radius: 18px;
   padding: 14px 16px;
+  box-shadow: var(--shadow);
 }
 .auth-panel summary {
   cursor: pointer;
   font-weight: 800;
-  color: #dce6f2;
+  color: var(--burnfolio-ink);
 }
 .auth-grid {
   display: grid;
@@ -280,26 +316,27 @@ form {
   justify-content: space-between;
   gap: 24px;
   align-items: flex-start;
-  border-left: 3px solid var(--lime);
+  border-left: 3px solid var(--burnfolio-flame);
   padding-left: 18px;
 }
 .profile h1,
 .dash h1 {
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
   font-size: clamp(36px, 5vw, 60px);
   line-height: 1.12;
   margin: 8px 0;
   padding-bottom: .04em;
-  letter-spacing: 0;
+  letter-spacing: -.025em;
   overflow-wrap: anywhere;
   word-break: break-word;
-  background: linear-gradient(90deg, #fff 0%, #d8ff63 54%, #66e1ff 100%);
+  background: linear-gradient(90deg, var(--burnfolio-ink) 0%, var(--burnfolio-ember) 54%, var(--burnfolio-flame) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
 .profile-head p,
 .dash-head p {
-  color: #c4cfdd;
+  color: var(--burnfolio-ash);
   overflow-wrap: anywhere;
   word-break: break-word;
   margin: 0;
@@ -310,11 +347,11 @@ form {
   flex-wrap: wrap;
 }
 .badges span {
-  border: 1px solid rgba(111, 133, 162, .25);
-  background: rgba(8, 13, 20, .64);
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-wash);
   border-radius: 999px;
   padding: 5px 9px;
-  color: #b8c5d3;
+  color: var(--burnfolio-ember);
   font-size: 12px;
   font-weight: 800;
 }
@@ -329,14 +366,14 @@ form {
 .panel,
 .row,
 .empty-state {
-  border: 1px solid rgba(111, 133, 162, .25);
-  background: linear-gradient(145deg, rgba(13, 18, 25, .9), rgba(10, 15, 22, .72));
-  border-radius: 8px;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-linen);
+  border-radius: 18px;
 }
 .stats div {
   min-width: 0;
   padding: 15px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+  box-shadow: var(--shadow);
 }
 .stats strong {
   display: block;
@@ -344,6 +381,8 @@ form {
   line-height: 1.06;
   margin-top: 8px;
   font-variant-numeric: tabular-nums;
+  font-family: "Space Mono", ui-monospace, monospace;
+  color: var(--burnfolio-blaze);
   overflow-wrap: anywhere;
 }
 .stats em {
@@ -357,16 +396,16 @@ form {
 
 .graph {
   min-width: 0;
-  border: 1px solid rgba(216, 255, 99, .18);
-  background: linear-gradient(145deg, rgba(14, 24, 18, .82), rgba(8, 14, 22, .84));
-  border-radius: 8px;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-linen);
+  border-radius: 18px;
   padding: 20px;
   margin-top: 24px;
-  box-shadow: 0 22px 80px rgba(0, 0, 0, .22);
+  box-shadow: var(--shadow);
 }
 .graph.compact {
-  border: 1px solid rgba(216, 255, 99, .14);
-  background: rgba(9, 14, 18, .45);
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-linen);
   padding: 16px;
   margin-top: 8px;
 }
@@ -379,6 +418,7 @@ form {
   min-width: 0;
 }
 .graph-head h2 {
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
   font-size: 21px;
   margin: 0;
 }
@@ -398,7 +438,7 @@ form {
   display: flex;
   align-items: center;
   gap: 5px;
-  color: #c5ceda;
+  color: var(--burnfolio-ash);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -428,7 +468,7 @@ form {
   grid-auto-flow: column;
   grid-auto-columns: var(--cell, 12px);
   gap: 4px;
-  color: #aeb9c7;
+  color: var(--burnfolio-ash);
   font-size: 12px;
   min-width: max-content;
 }
@@ -441,7 +481,7 @@ form {
   display: grid;
   grid-template-rows: repeat(7, var(--cell, 12px));
   gap: 4px;
-  color: #aeb9c7;
+  color: var(--burnfolio-ash);
   font-size: 11px;
   line-height: var(--cell, 12px);
   text-align: right;
@@ -480,8 +520,8 @@ form {
 .cell {
   width: var(--cell);
   height: var(--cell);
-  border-radius: 3px;
-  background: #1b2533;
+  border-radius: var(--burnfolio-r-cell);
+  background: var(--burnfolio-heat-0);
   display: inline-block;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .03);
 }
@@ -491,12 +531,12 @@ form {
   aspect-ratio: 1;
 }
 .cell.empty { visibility: hidden; }
-.l1 { background: #214936; }
-.l2 { background: #3f8f48; }
-.l3 { background: #9bd64b; }
+.l1 { background: var(--burnfolio-heat-1); }
+.l2 { background: var(--burnfolio-heat-2); }
+.l3 { background: var(--burnfolio-heat-3); }
 .l4 {
-  background: #d8ff63;
-  box-shadow: 0 0 14px rgba(216, 255, 99, .22);
+  background: var(--burnfolio-heat-4);
+  box-shadow: 0 0 14px rgba(242, 97, 28, .16);
 }
 .timeline-years {
   min-width: 0;
@@ -525,10 +565,10 @@ form {
   z-index: 50;
   max-width: 280px;
   padding: 8px 10px;
-  border: 1px solid rgba(216, 255, 99, .25);
-  border-radius: 8px;
-  background: #080d14;
-  color: var(--ink);
+  border: 1px solid var(--burnfolio-line);
+  border-radius: 12px;
+  background: var(--burnfolio-coal);
+  color: var(--burnfolio-chalk);
   font-size: 12px;
   box-shadow: 0 16px 50px rgba(0, 0, 0, .45);
   pointer-events: none;
@@ -572,7 +612,7 @@ form {
   margin-top: 14px;
 }
 .form-stack label {
-  color: #cbd5e1;
+  color: var(--burnfolio-ink);
   font-size: 13px;
   font-weight: 800;
 }
@@ -581,9 +621,9 @@ form {
   gap: 6px;
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid rgba(110, 132, 160, .22);
-  border-radius: 8px;
-  background: rgba(9, 14, 20, .48);
+  border: 1px solid var(--burnfolio-line);
+  border-radius: 12px;
+  background: var(--burnfolio-wash);
 }
 .profile-field span {
   color: var(--muted);
@@ -657,9 +697,9 @@ form {
   gap: 12px;
   margin-top: 18px;
   padding: 16px;
-  border: 1px solid rgba(216, 255, 99, .22);
-  background: linear-gradient(145deg, rgba(16, 25, 18, .94), rgba(10, 15, 22, .94));
-  border-radius: 8px;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-wash);
+  border-radius: 18px;
   white-space: normal;
 }
 .setup h2 {
@@ -679,7 +719,7 @@ form {
 .embed-disclosure,
 .utility-disclosure {
   margin-top: 24px;
-  border-top: 1px solid rgba(133, 154, 183, .2);
+  border-top: 1px solid var(--burnfolio-line);
   padding-top: 16px;
 }
 .embed-disclosure summary,
@@ -697,9 +737,9 @@ form {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  border: 1px solid rgba(110, 132, 160, .24);
-  background: rgba(9, 14, 20, .82);
-  border-radius: 8px;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-linen);
+  border-radius: 12px;
   padding: 10px;
 }
 .secret code {
@@ -715,9 +755,9 @@ form {
 .copy { padding: 9px 11px; }
 .snippet {
   min-width: 0;
-  border: 1px solid rgba(111, 133, 162, .26);
-  background: rgba(8, 13, 20, .86);
-  border-radius: 8px;
+  border: 1px solid var(--burnfolio-line);
+  background: var(--burnfolio-linen);
+  border-radius: 12px;
   padding: 12px;
 }
 .snippet > div {
@@ -737,15 +777,16 @@ form {
 }
 .embed {
   padding: 14px;
-  background: linear-gradient(145deg, rgba(9, 14, 20, .96), rgba(14, 24, 18, .92));
-  border: 1px solid rgba(216, 255, 99, .18);
-  border-radius: 8px;
+  background: var(--burnfolio-coal);
+  border: 1px solid var(--burnfolio-line-dark);
+  border-radius: 12px;
+  color: var(--burnfolio-chalk);
 }
 .embed > div:first-child {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  color: var(--ink);
+  color: var(--burnfolio-chalk);
 }
 .embed strong,
 .embed span { overflow-wrap: anywhere; }
@@ -830,6 +871,30 @@ form {
     justify-content: stretch;
   }
   .heatmap { --cell: 12px; }
+  .landing .preview .heatmap-scroll {
+    overflow: visible;
+  }
+  .landing .preview .heatmap-frame {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+  .landing .preview .month-labels,
+  .landing .preview .weekday-labels {
+    display: none;
+  }
+  .landing .preview .heatmap {
+    width: 100%;
+    min-width: 0;
+    grid-template-rows: repeat(7, minmax(0, 1fr));
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 3px;
+  }
+  .landing .preview .heatmap .cell {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+  }
   .year-heatmap,
   .year-heatmap-frame { --cell: 10px; }
   .embed > div:first-child {

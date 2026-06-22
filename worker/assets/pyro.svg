@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Pyro, the Burnfolio flame mascot">
+  <title>Pyro</title>
+  <!-- Body -->
+  <path fill="#F2611C" d="M150 24
+    C 154 60 170 78 188 104
+    C 210 134 216 168 200 198
+    C 184 226 156 240 124 240
+    C 78 240 42 208 42 162
+    C 42 128 62 108 84 86
+    C 98 72 106 60 104 40
+    C 118 60 132 56 134 32
+    C 140 46 144 40 150 24 Z"/>
+  <!-- Warm belly glow -->
+  <path fill="#FFB454" d="M124 132
+    C 150 132 172 150 172 178
+    C 172 206 150 222 124 222
+    C 96 222 76 204 76 178
+    C 76 150 98 132 124 132 Z"/>
+  <!-- Cheeks -->
+  <circle cx="86" cy="178" r="13" fill="#FF4D8D" opacity="0.55"/>
+  <circle cx="164" cy="178" r="13" fill="#FF4D8D" opacity="0.55"/>
+  <!-- Eyes -->
+  <ellipse cx="106" cy="160" rx="9" ry="12" fill="#2A1606"/>
+  <ellipse cx="144" cy="160" rx="9" ry="12" fill="#2A1606"/>
+  <circle cx="109" cy="156" r="3" fill="#FFF7EF"/>
+  <circle cx="147" cy="156" r="3" fill="#FFF7EF"/>
+  <!-- Smile -->
+  <path d="M110 182 C 118 196 138 196 146 182" fill="none" stroke="#2A1606" stroke-width="6" stroke-linecap="round"/>
+</svg>

@@ -15,6 +15,12 @@ async function route(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
 
+  if (path === "/favicon.svg") return assetResponse("pyro.svg");
+  if (path === "/favicon.ico") return assetResponse("pyro-512.png");
+  if (path === "/apple-touch-icon.png") return assetResponse("pyro-512.png");
+  if (path.match(/^\/assets\/[^/]+$/)) return assetResponse(path.split("/")[2]);
+  if (path === "/og/landing.png") return assetResponse("og-landing.png");
+  if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path === "/") return html(homePage());
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
@@ -323,6 +329,12 @@ async function profilePage(env, ref) {
   return html(profileHtml(profile));
 }
 
+async function ogProfilePage(env, ref) {
+  const profile = await buildProfile(env, ref);
+  if (!profile) return svgResponse(ogLandingFallbackSVG("Profile not found"), 404);
+  return svgResponse(ogProfileSVG(profile));
+}
+
 async function embedPage(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return html(notFoundPage(), 404);
@@ -494,19 +506,19 @@ async function uniqueAccountNumber(env) {
 }
 
 function homePage() {
-  return layout("Burnfolio", `
+  return layout("Burnfolio — Show your burn", `
     <main class="landing">
       <section class="hero">
         <div class="hero-copy">
-        <p class="eyebrow">Token burn profiles for AI-native builders</p>
-        <h1>Show your AI work like a contribution graph.</h1>
-        <p class="lede">Burnfolio turns local Claude, Codex, OpenCode, and Pi usage into a public token-burn profile for you, your machines, and your orgs.</p>
+        <p class="eyebrow">Burn graph for AI-native builders</p>
+        <h1>Show your burn.</h1>
+        <p class="lede">The contribution graph for everything you build with AI. Install <code>pyro</code>, sync token counts, and share a graph worth showing off.</p>
         <form class="signup" method="post" action="/api/signup" data-signup>
           <label class="sr-only" for="signup-machine">Machine name</label>
           <input id="signup-machine" name="machine_name" placeholder="machine name" autocomplete="off">
-          <button>Create anonymous account</button>
+          <button>Show your burn</button>
         </form>
-        <p class="helper">No email required. You get an account number, account key, and machine token.</p>
+        <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine.</p>
         <div class="result" data-result hidden></div>
         </div>
         <section class="preview">
@@ -542,7 +554,12 @@ function homePage() {
       </section>
     </main>
     <script>${signupScript()}</script>
-  `);
+  `, {
+    description: "The contribution graph for everything you build with AI. Install pyro, sync token counts, and show your burn.",
+    image: "https://burnfolio.ai/og/landing.png",
+    imageType: "image/png",
+    canonical: "https://burnfolio.ai/",
+  });
 }
 
 async function appPage(request, env) {
@@ -640,6 +657,7 @@ function profileHtml(profile) {
   const svgSnippet = `<img src="https://burnfolio.ai/embed/${name}.svg" alt="Burnfolio token burn graph">`;
   const markdownSnippet = `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg)](https://burnfolio.ai/${name})`;
   const profileURL = `https://burnfolio.ai/${name}`;
+  const description = `${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active days. Show your burn on Burnfolio.`;
   return layout(`${name} on Burnfolio`, `
     <main class="profile">
       <header class="profile-head">
@@ -667,7 +685,13 @@ function profileHtml(profile) {
         </div>
       </details>
     </main>
-  `);
+  `, {
+    description,
+    image: `https://burnfolio.ai/og/${encodeURIComponent(name)}.svg`,
+    imageType: "image/svg+xml",
+    canonical: profileURL,
+    siteName: "Burnfolio",
+  });
 }
 
 function embedHtml(profile) {
@@ -683,7 +707,7 @@ function svgEmbed(profile) {
   const gap = 4;
   const left = 22;
   const top = 62;
-  const colors = ["#1b2533", "#214936", "#3f8f48", "#9bd64b", "#d8ff63"];
+  const colors = ["#2A2017", "#7A3D12", "#C0590F", "#F2611C", "#FF8A3D"];
   const rects = cells.map((cell, i) => {
     const x = left + Math.floor(i / 7) * (cellSize + gap);
     const y = top + (i % 7) * (cellSize + gap);
@@ -692,20 +716,61 @@ function svgEmbed(profile) {
   const width = left * 2 + 53 * (cellSize + gap);
   const height = 184;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(name)} Burnfolio token burn graph">
-  <rect width="100%" height="100%" rx="8" fill="#0b0c0f"/>
-  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#263241"/>
-  <text x="22" y="30" fill="#edf1f7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
-  <text x="22" y="50" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active days</text>
+  <rect width="100%" height="100%" rx="8" fill="#1C140D"/>
+  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#3A2A1B"/>
+  <text x="22" y="30" fill="#FBF1E6" font-family="Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
+  <text x="22" y="50" fill="#BBA68E" font-family="Space Mono, ui-monospace, monospace" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active days</text>
   ${rects}
-  <text x="22" y="164" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
+  <text x="22" y="164" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
   <rect x="55" y="155" width="10" height="10" rx="2" fill="${colors[0]}"/>
   <rect x="70" y="155" width="10" height="10" rx="2" fill="${colors[1]}"/>
   <rect x="85" y="155" width="10" height="10" rx="2" fill="${colors[2]}"/>
   <rect x="100" y="155" width="10" height="10" rx="2" fill="${colors[3]}"/>
   <rect x="115" y="155" width="10" height="10" rx="2" fill="${colors[4]}"/>
-  <text x="132" y="164" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
-  <text x="${width - 22}" y="164" text-anchor="end" fill="#d8ff63" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700">burnfolio.ai</text>
+  <text x="132" y="164" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
+  <text x="${width - 22}" y="164" text-anchor="end" fill="#FF8A3D" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700">burnfolio.ai</text>
 </svg>`;
+}
+
+function ogProfileSVG(profile) {
+  const ref = profile.account.handle || profile.account.account_number;
+  const displayName = profile.account.handle || profile.account.display_name || profile.account.account_number;
+  const cells = heatmapCellData(profile.days, 365, heatmapScale(profile.days));
+  const colors = ["#F2E7D9", "#FBD089", "#F99B3C", "#F2611C", "#D6300B"];
+  const cell = 10;
+  const gap = 4;
+  const left = 86;
+  const top = 318;
+  const rects = cells.map((day, i) => {
+    const x = left + Math.floor(i / 7) * (cell + gap);
+    const y = top + (i % 7) * (cell + gap);
+    return `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" fill="${colors[day.level]}"/>`;
+  }).join("");
+  const best = profile.stats.best_day ? `Best day ${formatCompact(profile.stats.best_day_tokens)}` : "Install pyro to light it up";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="${esc(displayName)} Burnfolio burn graph">
+  <defs>
+    <radialGradient id="warmA" cx="88%" cy="0%" r="70%"><stop offset="0" stop-color="#FFC23D" stop-opacity=".36"/><stop offset="1" stop-color="#FFF9F2" stop-opacity="0"/></radialGradient>
+    <radialGradient id="warmB" cx="0%" cy="8%" r="68%"><stop offset="0" stop-color="#F2611C" stop-opacity=".18"/><stop offset="1" stop-color="#FFF9F2" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#FFF9F2"/>
+  <rect width="1200" height="630" fill="url(#warmA)"/>
+  <rect width="1200" height="630" fill="url(#warmB)"/>
+  <g transform="translate(84 70)">
+    <path fill="#F2611C" d="M43.9 5.8C46.2 18.7 49.1 25.1 54.9 33.9C60.2 42.1 61.4 52 56.1 59.6C50.3 67.8 40.3 70.2 33.8 69C22.6 67.3 13.8 59.1 13.3 46.7C12.7 37.3 19.2 32 25 25C28.5 20.9 30.2 16.8 29.7 10.9C33.8 16.8 37.9 16.2 38.5 8.6C40.3 12.7 42 10.3 43.9 5.8Z"/>
+    <path fill="#FFC23D" d="M40.3 35C41.4 42 44.4 45.5 46.7 50.8C49.1 56.1 47.3 62.5 41.4 64.9C36.2 67 29.7 65.5 26.8 60.8C23.8 56.1 25 50.2 29.1 45.5C32.1 42 33.8 38.5 33.2 33.8C36.2 37.9 37.9 36.7 38.5 32C39.1 33.8 39.7 33.8 40.3 35Z"/>
+    <text x="84" y="48" fill="#211405" font-family="Bricolage Grotesque, Arial, sans-serif" font-size="42" font-weight="800" letter-spacing="-.8">Burnfolio</text>
+  </g>
+  <text x="86" y="202" fill="#A83505" font-family="Space Mono, monospace" font-size="18" font-weight="700" letter-spacing="2">SHOW YOUR BURN</text>
+  <text x="84" y="270" fill="#211405" font-family="Bricolage Grotesque, Arial, sans-serif" font-size="58" font-weight="800" letter-spacing="-1.6">${esc(displayName)}</text>
+  <text x="86" y="540" fill="#211405" font-family="Space Mono, monospace" font-size="28" font-weight="700">${formatInt(profile.total_tokens)} tokens</text>
+  <text x="430" y="540" fill="#6F5F4D" font-family="Space Mono, monospace" font-size="22">${formatInt(profile.stats.active_days)} active days · ${esc(best)}</text>
+  ${rects}
+  <text x="1116" y="557" text-anchor="end" fill="#A83505" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="22" font-weight="700">burnfolio.ai/${esc(ref)}</text>
+</svg>`;
+}
+
+function ogLandingFallbackSVG(message) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><rect width="1200" height="630" fill="#FFF9F2"/><text x="80" y="320" fill="#211405" font-family="Arial, sans-serif" font-size="56" font-weight="700">${esc(message)}</text></svg>`;
 }
 
 function notFoundPage() {
@@ -716,8 +781,35 @@ function authResultPage(message, ok) {
   return layout(ok ? "Signed in" : "Sign in failed", `<main class="profile"><p class="eyebrow">${ok ? "Success" : "Link error"}</p><h1>${esc(message)}</h1><a href="/app">Open dashboard</a></main>`);
 }
 
-function layout(title, body) {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${css()}</style></head><body><nav><a href="/">Burnfolio</a><a href="/app">App</a></nav>${body}<script>${globalScript()}</script></body></html>`;
+function layout(title, body, meta = {}) {
+  const description = meta.description || "Burnfolio turns your AI token burn into a contribution graph worth sharing.";
+  const canonical = meta.canonical || "https://burnfolio.ai";
+  const image = meta.image || "https://burnfolio.ai/og/landing.png";
+  const imageType = meta.imageType || "image/png";
+  const siteName = meta.siteName || "Burnfolio";
+  return `<!doctype html><html lang="en" class="brand-burnfolio"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)}</title>
+<meta name="description" content="${esc(description)}">
+<link rel="canonical" href="${esc(canonical)}">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="${esc(siteName)}">
+<meta property="og:title" content="${esc(title)}">
+<meta property="og:description" content="${esc(description)}">
+<meta property="og:url" content="${esc(canonical)}">
+<meta property="og:image" content="${esc(image)}">
+<meta property="og:image:type" content="${esc(imageType)}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${esc(title)}">
+<meta name="twitter:description" content="${esc(description)}">
+<meta name="twitter:image" content="${esc(image)}">
+<style>${css()}</style></head><body><nav><a class="nav-brand" href="/"><img src="/assets/logo.svg" alt="" width="28" height="28"><span>Burnfolio</span></a><a href="/app">App</a></nav>${body}<script>${globalScript()}</script></body></html>`;
 }
 
 function heatmap(days, options = {}) {
@@ -916,6 +1008,10 @@ function level(value, scale = null) {
 
 function css() {
   return "/* Built CSS is injected into dist/worker/index.js by scripts/build-worker.mjs. */";
+}
+
+function assetData() {
+  return {};
 }
 
 function signupScript() {
@@ -1196,6 +1292,32 @@ function html(body, status = 200) {
   return new Response(body, { status, headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
 
+function svgResponse(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=300",
+    },
+  });
+}
+
+function assetResponse(name) {
+  const asset = assetData()[name];
+  if (!asset) return new Response("Not found", { status: 404 });
+  const headers = {
+    "Content-Type": asset.type,
+    "Cache-Control": "public, max-age=31536000, immutable",
+  };
+  if (asset.encoding === "base64") {
+    const binary = atob(asset.body);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Response(bytes, { headers });
+  }
+  return new Response(asset.body, { headers });
+}
+
 function cookie(token) {
   return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000`;
 }
@@ -1264,35 +1386,35 @@ async function sendMagicEmail(env, to, link) {
 }
 
 function magicEmailText(link) {
-  return `Sign in to Burnfolio\n\nUse this link to open your Burnfolio dashboard. It expires in 15 minutes.\n\n${link}\n\nIf you did not request this email, you can ignore it.`;
+  return `Sign in to Burnfolio\n\nUse this link to open your burn graph dashboard. It expires in 15 minutes.\n\n${link}\n\nIf you did not request this email, you can ignore it.`;
 }
 
 function magicEmailHtml(link) {
   const safeLink = esc(link);
   return `<!doctype html>
 <html>
-  <body style="margin:0;background:#07090d;color:#f3f7ff;font-family:Inter,Segoe UI,Arial,sans-serif">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#07090d;padding:32px 16px">
+  <body style="margin:0;background:#FFF9F2;color:#211405;font-family:Plus Jakarta Sans,Segoe UI,Arial,sans-serif">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#FFF9F2;padding:32px 16px">
       <tr>
         <td align="center">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;border:1px solid #263241;border-radius:8px;background:#0d1219;overflow:hidden">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;border:1px solid #EEDDCB;border-radius:18px;background:#FFFCF7;overflow:hidden">
             <tr>
-              <td style="padding:28px 28px 10px;border-top:4px solid #d8ff63">
-                <div style="font-size:18px;font-weight:800;color:#f3f7ff">Burnfolio</div>
-                <h1 style="margin:28px 0 10px;font-size:28px;line-height:1.1;color:#f3f7ff">Open your token burn dashboard</h1>
-                <p style="margin:0;color:#a8b2c1;font-size:15px;line-height:1.55">This magic link signs you in to Burnfolio and expires in 15 minutes.</p>
+              <td style="padding:28px 28px 10px;border-top:4px solid #F2611C">
+                <div style="font-size:18px;font-weight:800;color:#211405">Burnfolio</div>
+                <h1 style="margin:28px 0 10px;font-size:30px;line-height:1.08;color:#211405;font-family:Bricolage Grotesque,Segoe UI,Arial,sans-serif">Open your burn graph</h1>
+                <p style="margin:0;color:#6F5F4D;font-size:15px;line-height:1.55">This magic link signs you in to Burnfolio and expires in 15 minutes.</p>
               </td>
             </tr>
             <tr>
               <td style="padding:18px 28px">
-                <a href="${safeLink}" style="display:inline-block;background:#d8ff63;color:#11160c;text-decoration:none;font-weight:800;border-radius:8px;padding:13px 18px">Sign in to Burnfolio</a>
+                <a href="${safeLink}" style="display:inline-block;background:#F2611C;color:#211405;text-decoration:none;font-weight:800;border-radius:999px;padding:13px 18px">Sign in to Burnfolio</a>
               </td>
             </tr>
             <tr>
               <td style="padding:0 28px 28px">
-                <p style="margin:0 0 10px;color:#a8b2c1;font-size:13px;line-height:1.5">If the button does not work, paste this URL into your browser:</p>
-                <p style="margin:0;padding:12px;border:1px solid #263241;border-radius:8px;background:#080d14;color:#d8ff63;font-size:12px;line-height:1.45;word-break:break-all">${safeLink}</p>
-                <p style="margin:18px 0 0;color:#6f7d8f;font-size:12px;line-height:1.5">If you did not request this email, you can ignore it.</p>
+                <p style="margin:0 0 10px;color:#6F5F4D;font-size:13px;line-height:1.5">If the button does not work, paste this URL into your browser:</p>
+                <p style="margin:0;padding:12px;border:1px solid #EEDDCB;border-radius:12px;background:#FBEFE0;color:#A83505;font-family:Space Mono,Consolas,monospace;font-size:12px;line-height:1.45;word-break:break-all">${safeLink}</p>
+                <p style="margin:18px 0 0;color:#6F5F4D;font-size:12px;line-height:1.5">If you did not request this email, you can ignore it.</p>
               </td>
             </tr>
           </table>
