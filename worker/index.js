@@ -55,10 +55,10 @@ async function route(request, env) {
   if (path === "/og/landing.png") return assetResponse("og-landing.png");
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
-  if (path === "/") return html(homePage());
+  if (path === "/") return html(homePage(await signedIn(request, env)));
   if (path === "/signup") return authRoute(request, env, "signup");
   if (path === "/signin") return authRoute(request, env, "signin");
-  if (path === "/how-we-count") return html(howWeCountPage());
+  if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/app/orgs") return html(await orgsPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
@@ -80,9 +80,9 @@ async function route(request, env) {
   if (path.match(/^\/embed\/[^/]+\.svg$/)) return embedSVGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/embed\/[^/]+$/)) return embedPage(env, decodeURIComponent(path.split("/")[2]));
   if (path.match(/^\/embed\/[^/]+\/script\.js$/)) return embedScript(request, decodeURIComponent(path.split("/")[2]));
-  if (path.match(/^\/[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/)) return profilePage(env, path.slice(1));
+  if (path.match(/^\/[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/)) return profilePage(request, env, path.slice(1));
 
-  return html(notFoundPage(), 404);
+  return html(notFoundPage(await signedIn(request, env)), 404);
 }
 
 async function signup(request, env) {
@@ -414,10 +414,11 @@ async function profileStatsRoute(env, ref) {
   return json(profile);
 }
 
-async function profilePage(env, ref) {
+async function profilePage(request, env, ref) {
   const profile = await buildProfile(env, ref);
-  if (!profile) return html(notFoundPage(), 404);
-  return html(profileHtml(profile));
+  const isSignedIn = await signedIn(request, env);
+  if (!profile) return html(notFoundPage(isSignedIn), 404);
+  return html(profileHtml(profile, isSignedIn));
 }
 
 async function ogProfilePage(env, ref) {
@@ -640,6 +641,10 @@ async function requireUser(request, env) {
   return { id: row.user_id };
 }
 
+async function signedIn(request, env) {
+  return Boolean(await requireUser(request, env));
+}
+
 async function createSession(env, userID) {
   const sessionToken = randomToken("bf_session");
   await env.DB.prepare("INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)").bind(await sha256(sessionToken), userID).run();
@@ -655,7 +660,7 @@ async function uniqueAccountNumber(env) {
   throw new Error("account_number_exhausted");
 }
 
-function homePage() {
+function homePage(isSignedIn = false) {
   return layout("Burnfolio — Show your burn", `
     <main class="landing">
       <section class="hero">
@@ -664,8 +669,9 @@ function homePage() {
         <h1>Show your burn.</h1>
         <p class="lede">The contribution graph for everything you build with AI. Install <code>pyro</code>, sync token counts, and share a graph worth showing off.</p>
         <div class="hero-actions">
-          <a class="button" href="/signup">Create your graph</a>
-          <a class="button secondary" href="/signin">Sign in</a>
+          ${isSignedIn
+            ? `<a class="button" href="/app">Open dashboard</a>`
+            : `<a class="button" href="/signup">Create your graph</a><a class="button secondary" href="/signin">Sign in</a>`}
         </div>
         <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine.</p>
         </div>
@@ -687,6 +693,7 @@ function homePage() {
     image: "https://burnfolio.ai/og/landing.png",
     imageType: "image/png",
     canonical: "https://burnfolio.ai/",
+    signedIn: isSignedIn,
   });
 }
 
@@ -781,7 +788,7 @@ async function appPage(request, env) {
   const emailSummary = emails.length
     ? ` · ${esc(emails[0].email)}${emails[0].verified_at ? " verified" : " pending"}`
     : "";
-  return layout("Burnfolio app", `
+  return layout("Burnfolio dashboard", `
     <main class="dash">
       <header class="dash-head">
         <div><p class="eyebrow">Dashboard</p><h1>${esc(account.handle || "Anonymous builder")}</h1><p class="muted">Account <code>${esc(account.account_number)}</code>${emailSummary}</p></div>
@@ -815,7 +822,7 @@ async function appPage(request, env) {
       </div>
     </main>
     <script>${dashboardScript(profileRef)}</script>
-  `);
+  `, { signedIn: true });
 }
 
 async function orgsPage(request, env) {
@@ -856,7 +863,7 @@ async function orgsPage(request, env) {
       </section>
     </main>
     <script>${orgManagementScript()}</script>
-  `);
+  `, { signedIn: true });
 }
 
 async function orgMemberRows(env, orgID) {
@@ -930,7 +937,7 @@ function accountRef(account) {
   return account.handle || account.account_number;
 }
 
-function profileHtml(profile) {
+function profileHtml(profile, isSignedIn = false) {
   const name = profile.account.handle || profile.account.account_number;
   const hasHandle = Boolean(profile.account.handle);
   const hasLabel = Boolean(profile.account.display_name && profile.account.display_name !== "Anonymous builder" && profile.account.display_name !== profile.account.account_number);
@@ -974,6 +981,7 @@ function profileHtml(profile) {
     imageType: "image/png",
     canonical: profileURL,
     siteName: "Burnfolio",
+    signedIn: isSignedIn,
   });
 }
 
@@ -1317,15 +1325,15 @@ function crc32(data) {
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
-function notFoundPage() {
-  return layout("Not found", `<main class="profile"><h1>Profile not found</h1><a href="/">Create one</a></main>`);
+function notFoundPage(isSignedIn = false) {
+  return layout("Not found", `<main class="profile"><h1>Profile not found</h1><a href="/">Create one</a></main>`, { signedIn: isSignedIn });
 }
 
 function authResultPage(message, ok) {
   return layout(ok ? "Signed in" : "Sign in failed", `<main class="profile"><p class="eyebrow">${ok ? "Success" : "Link error"}</p><h1>${esc(message)}</h1><a href="/app">Open dashboard</a></main>`);
 }
 
-function howWeCountPage() {
+function howWeCountPage(isSignedIn = false) {
   return layout("How Burnfolio counts token burn", `
     <main class="learn-page">
       <header class="learn-hero">
@@ -1366,6 +1374,7 @@ function howWeCountPage() {
   `, {
     description: "Learn how Burnfolio counts token burn, updates daily graph cells, and handles machines and organizations.",
     canonical: "https://burnfolio.ai/how-we-count",
+    signedIn: isSignedIn,
   });
 }
 
@@ -1375,6 +1384,9 @@ function layout(title, body, meta = {}) {
   const image = meta.image || "https://burnfolio.ai/og/landing.png";
   const imageType = meta.imageType || "image/png";
   const siteName = meta.siteName || "Burnfolio";
+  const navLinks = meta.signedIn
+    ? `<a href="/how-we-count">How we count</a><a class="nav-cta" href="/app">Dashboard</a>`
+    : `<a href="/how-we-count">How we count</a><a href="/signin">Sign in</a><a class="nav-cta" href="/signup">Create graph</a>`;
   return `<!doctype html><html lang="en" class="brand-burnfolio"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(description)}">
@@ -1397,7 +1409,7 @@ function layout(title, body, meta = {}) {
 <meta name="twitter:title" content="${esc(title)}">
 <meta name="twitter:description" content="${esc(description)}">
 <meta name="twitter:image" content="${esc(image)}">
-<style>${css()}</style></head><body><nav><a class="nav-brand" href="/"><img src="/assets/logo.svg" alt="" width="28" height="28"><span>Burnfolio</span></a><div class="nav-links"><a href="/how-we-count">How we count</a><a href="/signin">Sign in</a><a class="nav-cta" href="/signup">Create graph</a><a href="/app">App</a></div></nav>${body}<script>${globalScript()}</script></body></html>`;
+<style>${css()}</style></head><body><nav><a class="nav-brand" href="/"><img src="/assets/logo.svg" alt="" width="28" height="28"><span>Burnfolio</span></a><div class="nav-links">${navLinks}</div></nav>${body}<script>${globalScript()}</script></body></html>`;
 }
 
 function heatmap(days, options = {}) {
