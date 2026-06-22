@@ -1,6 +1,6 @@
 # Burnfolio
 
-Burnfolio collects local AI coding-agent usage data and summarizes token burn by UTC
+Burnfolio collects local AI coding-agent usage data and summarizes token burn by
 date, CLI type, and model.
 
 The hosted app runs on Cloudflare Workers at `https://burnfolio.ai`, with D1 for
@@ -30,12 +30,17 @@ Release assets are available at
 
 The installer downloads the latest release binary, installs it to
 `/usr/local/bin` or `~/.local/bin`, and can optionally run an immediate sync.
+If you already have a Burnfolio machine token, you can either pass it with
+`--profile` and `--machine` or let the interactive installer prompt for it.
 
 For a new machine token from the dashboard, copy the generated one-liner:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile <account-number-or-username> --machine <machine-token>
 ```
+
+The dashboard keeps a copy-ready install command on each machine row for tokens
+created after the current storage migration.
 
 The installer asks whether to set up automatic sync with cron: `none`, `hourly`,
 or `daily`. For non-interactive setup, pass the schedule explicitly:
@@ -57,6 +62,22 @@ Useful installer flags:
 --server https://burnfolio.ai
 --install-dir ~/.local/bin
 --version v0.1.0
+```
+
+Uninstall pyro and remove Burnfolio cron sync entries:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/uninstall.sh | bash
+```
+
+Useful uninstaller flags:
+
+```sh
+--profile <account-or-username>
+--install-dir ~/.local/bin
+--keep-binary
+--keep-cron
+--yes
 ```
 
 ## CLI Usage
@@ -86,11 +107,11 @@ go install ./cmd/pyro
 pyro
 ```
 
-The table output is grouped by UTC date, CLI, and model. JSON output includes
+The table output is grouped by date, CLI, and model. JSON output includes
 provider totals plus the same date/CLI/model segments for the future server API.
 
 When `--profile` and `--machine` are provided, the CLI uploads all local history to
-Burnfolio as one idempotent total per UTC day. Re-running the same command
+Burnfolio as one idempotent total per day. Re-running the same command
 replaces each machine/day row instead of double-counting it.
 
 ## Hosted Flow
@@ -107,9 +128,9 @@ curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh
 ```
 
 From the dashboard you can claim a username, attach an optional email for magic
-links, create more machine tokens, create the `nbitslabs` org, and add users as
-members or admins. Public user and org pages expose the same burn graph plus
-iframe and SVG embed snippets.
+links, create personal or organization machine tokens, create the `nbitslabs`
+org, and add users as members or admins. Public user and org pages expose the
+same burn graph plus iframe and SVG embed snippets.
 
 ## Live Smoke Test
 

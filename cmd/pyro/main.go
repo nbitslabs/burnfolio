@@ -77,7 +77,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "sync failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("\nSynced %d UTC days to %s for %s.\n", result.UpsertedDays, strings.TrimRight(server, "/"), profile)
+		fmt.Printf("\nSynced %d days to %s for %s.\n", result.UpsertedDays, strings.TrimRight(server, "/"), profile)
 	}
 
 	if len(report.Warnings) > 0 {

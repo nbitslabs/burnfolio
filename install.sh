@@ -21,6 +21,7 @@ Usage:
 Options:
   --profile <account-or-username>   Burnfolio profile to sync to.
   --machine <machine-token>         Burnfolio machine token.
+                                    If omitted in an interactive shell, the installer can prompt for existing values.
   --schedule <none|hourly|daily>    Configure a cron sync schedule non-interactively.
   --server <url>                    Burnfolio server URL. Defaults to https://burnfolio.ai.
   --providers <list>                Providers to scan. Defaults to claude,codex,opencode,pi.
@@ -129,6 +130,29 @@ prompt_schedule() {
   done
 }
 
+prompt_existing_token() {
+  if [ ! -r /dev/tty ]; then
+    return
+  fi
+  printf "\nConfigure an existing Burnfolio machine token now? [y/N] " > /dev/tty
+  IFS= read -r answer < /dev/tty || answer=""
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *) return ;;
+  esac
+
+  printf "Profile account number or username: " > /dev/tty
+  IFS= read -r profile < /dev/tty || profile=""
+  printf "Machine token: " > /dev/tty
+  IFS= read -r machine < /dev/tty || machine=""
+
+  if [ -z "$profile" ] || [ -z "$machine" ]; then
+    profile=""
+    machine=""
+    echo "Skipping Burnfolio sync setup because profile or machine token was empty." > /dev/tty
+  fi
+}
+
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m | tr '[:upper:]' '[:lower:]')"
 case "$os" in
@@ -184,6 +208,10 @@ pyro_path="${install_dir}/pyro"
 echo "Installed ${pyro_path}"
 if ! command -v pyro >/dev/null 2>&1 && ! printf '%s' ":$PATH:" | grep -q ":${install_dir}:"; then
   echo "Note: ${install_dir} is not on PATH. Add it or run ${pyro_path} directly."
+fi
+
+if [ -z "$profile" ] && [ -z "$machine" ]; then
+  prompt_existing_token
 fi
 
 sync_cmd="$(shell_quote "$pyro_path") --providers $(shell_quote "$providers")"

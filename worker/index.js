@@ -44,7 +44,11 @@ async function signup(request, env) {
   const handle = cleanHandle(body.username || body.handle);
   const user = await createUser(env, { email, handle });
   if (user.error) return json(user, user.status || 400);
-  const machine = await createMachine(env, user.id, body.machine_name || "First machine");
+  const machine = await createMachine(env, {
+    userID: user.id,
+    name: body.machine_name || "First machine",
+    profileRef: accountRef(user.account),
+  });
   const sessionToken = await createSession(env, user.id);
   return json({ account: user.account, account_key: user.accountKey, machine }, 201, {
     "Set-Cookie": cookie(sessionToken),
@@ -159,7 +163,7 @@ async function consumeMagicLink(request, env) {
 async function me(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ user: null });
-  const machines = await env.DB.prepare("SELECT machine_number, name, created_at, last_seen_at FROM machines WHERE user_id = ? ORDER BY created_at DESC").bind(user.id).all();
+  const machines = await machineRows(env, user.id);
   const orgs = await env.DB.prepare(`
     SELECT a.account_number, h.handle, a.display_name, m.role
     FROM memberships m
@@ -193,7 +197,20 @@ async function createMachineRoute(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
   const body = await readBody(request);
-  const machine = await createMachine(env, user.id, body.name || "Machine");
+  const scopeRef = String(body.org || body.org_ref || "").trim();
+  let org = null;
+  if (scopeRef) {
+    org = await resolveAccount(env, scopeRef);
+    if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
+    const member = await env.DB.prepare("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?").bind(org.id, user.id).first();
+    if (!member) return json({ error: "forbidden" }, 403);
+  }
+  const machine = await createMachine(env, {
+    userID: user.id,
+    name: body.name || "Machine",
+    orgID: org ? org.id : "",
+    profileRef: org ? accountRef(org) : accountRef(await accountView(env, user.id)),
+  });
   return json({ machine }, 201);
 }
 
@@ -230,11 +247,11 @@ async function addOrgMemberRoute(request, env, orgRef) {
 async function ingest(request, env) {
   const token = bearerToken(request);
   if (!token) return json({ error: "missing_machine_token" }, 401);
-  const machine = await env.DB.prepare("SELECT id, user_id FROM machines WHERE token_hash = ?").bind(await sha256(token)).first();
+  const machine = await env.DB.prepare("SELECT id, user_id, org_id FROM machines WHERE token_hash = ?").bind(await sha256(token)).first();
   if (!machine) return json({ error: "invalid_machine_token" }, 401);
   const body = await readBody(request);
   const account = await resolveAccount(env, String(body.profile || ""));
-  if (!account || account.id !== machine.user_id) return json({ error: "profile_machine_mismatch" }, 403);
+  if (!account || !machineCanSyncToAccount(machine, account)) return json({ error: "profile_machine_mismatch" }, 403);
   const days = Array.isArray(body.days) ? body.days.slice(0, 5000) : [];
   const statements = [];
   for (const day of days) {
@@ -366,13 +383,39 @@ async function createOrg(env, { handle, displayName, ownerUserID }) {
   return accountView(env, id);
 }
 
-async function createMachine(env, userID, name) {
+async function createMachine(env, { userID, name, orgID = "", profileRef = "" }) {
   const id = crypto.randomUUID();
   const machineNumber = "m_" + randomBase36(10);
   const token = randomToken("bfm");
-  await env.DB.prepare("INSERT INTO machines (id, user_id, machine_number, name, token_hash) VALUES (?, ?, ?, ?, ?)")
-    .bind(id, userID, machineNumber, cleanText(name, 80), await sha256(token)).run();
-  return { machine_number: machineNumber, name: cleanText(name, 80), token };
+  await env.DB.prepare("INSERT INTO machines (id, user_id, org_id, machine_number, name, token_hash, token) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, userID, orgID || null, machineNumber, cleanText(name, 80), await sha256(token), token).run();
+  return { machine_number: machineNumber, name: cleanText(name, 80), token, profile: profileRef };
+}
+
+async function machineRows(env, userID) {
+  return env.DB.prepare(`
+    SELECT
+      m.machine_number,
+      m.name,
+      m.created_at,
+      m.last_seen_at,
+      m.token,
+      m.org_id,
+      oa.account_number AS org_account_number,
+      oh.handle AS org_handle,
+      oa.display_name AS org_display_name
+    FROM machines m
+    LEFT JOIN accounts oa ON oa.id = m.org_id
+    LEFT JOIN handles oh ON oh.account_id = oa.id
+    WHERE m.user_id = ?
+    ORDER BY m.created_at DESC
+  `).bind(userID).all();
+}
+
+function machineCanSyncToAccount(machine, account) {
+  if (account.kind === "user") return account.id === machine.user_id && !machine.org_id;
+  if (account.kind === "org") return account.id === machine.org_id;
+  return false;
 }
 
 async function accountView(env, id) {
@@ -438,7 +481,7 @@ function homePage() {
           <div class="preview-top">
             <div><span>Public burn graph</span><strong>8.4B sample tokens</strong></div>
           </div>
-          ${heatmap(sampleDays(), { fit: true, span: 182, subtitle: "Last 26 weeks" })}
+          ${heatmap(sampleDays(), { span: 365, title: "Last 365 days", subtitle: "Sample burn graph" })}
           <div class="steps">
             <span>Create a profile</span>
             <span>Run <code>pyro</code></span>
@@ -475,7 +518,7 @@ async function appPage(request, env) {
   if (!user) return homePage();
   const account = await accountView(env, user.id);
   const userInfo = await env.DB.prepare("SELECT email, email_verified_at FROM users WHERE id = ?").bind(user.id).first();
-  const machines = await env.DB.prepare("SELECT machine_number, name, created_at, last_seen_at FROM machines WHERE user_id = ? ORDER BY created_at DESC").bind(user.id).all();
+  const machines = await machineRows(env, user.id);
   const orgs = await env.DB.prepare(`
     SELECT a.account_number, h.handle, a.display_name, m.role
     FROM memberships m
@@ -485,6 +528,9 @@ async function appPage(request, env) {
     ORDER BY a.created_at DESC
   `).bind(user.id).all();
   const profileRef = account.handle || account.account_number;
+  const machineScope = orgs.results.length
+    ? `<select name="org" aria-label="Machine scope"><option value="">Personal profile</option>${orgs.results.map((org) => `<option value="${esc(accountRef(org))}">${esc(org.display_name || accountRef(org))}</option>`).join("")}</select>`
+    : "";
   const profileHelp = account.handle ? "Manage your public identity and recovery email." : "Claim a readable username and attach an email for recovery.";
   const handleControl = account.handle
     ? `<div class="profile-field"><span>Username</span><strong>${esc(account.handle)}</strong></div>`
@@ -497,11 +543,15 @@ async function appPage(request, env) {
       </header>
       <div class="dash-grid">
         <section class="panel primary-panel">
-          <div class="section-head"><div><h2>Connect a machine</h2><p class="muted">Create a token, then run the generated command locally.</p></div></div>
-          <form class="form-row" data-machine><label class="sr-only" for="machine-name">Machine name</label><input id="machine-name" name="name" placeholder="machine name, e.g. macbook-pro"><button>Create token</button></form>
-          <p class="command-preview"><code>${esc(installCommand(profileRef, "<token>"))}</code></p>
+          <div class="section-head"><div><h2>Connect a machine</h2><p class="muted">Create a token, then copy the generated install command.</p></div></div>
+          <form class="form-row" data-machine><label class="sr-only" for="machine-name">Machine name</label><input id="machine-name" name="name" placeholder="machine name, e.g. macbook-pro">${machineScope}<button>Create token</button></form>
           <div class="result" data-machine-result hidden></div>
-          <div class="list">${machines.results.map(machineRow).join("") || emptyState("No machines connected", "Create a token and sync with pyro to start filling your burn graph.")}</div>
+          <div class="list">${machines.results.map((machine) => machineRow(machine, profileRef)).join("") || emptyState("No machines connected", "Create a token and sync with pyro to start filling your burn graph.")}</div>
+          <details class="utility-disclosure">
+            <summary>Uninstall pyro</summary>
+            <p class="muted">This removes the local binary and any Burnfolio cron sync entries.</p>
+            <div class="snippet"><div><span>Uninstall command</span><button type="button" class="secondary copy" data-copy="${esc(uninstallCommand())}">Copy</button></div><code>${esc(uninstallCommand())}</code></div>
+          </details>
         </section>
         <section class="panel">
           <div class="section-head"><div><h2>Profile</h2><p class="muted">${esc(profileHelp)}</p></div></div>
@@ -521,8 +571,14 @@ async function appPage(request, env) {
   `);
 }
 
-function machineRow(machine) {
-  return `<div class="row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div></div>`;
+function machineRow(machine, fallbackProfileRef) {
+  const profileRef = machine.org_handle || machine.org_account_number || fallbackProfileRef;
+  const scope = machine.org_id ? `org ${machine.org_display_name || profileRef}` : "personal profile";
+  const command = machine.token ? installCommand(profileRef, machine.token) : "";
+  const action = command
+    ? `<button type="button" class="secondary copy" data-copy="${esc(command)}">Copy install</button>`
+    : `<span class="row-note">Create a new token to get a copy-ready command.</span>`;
+  return `<div class="row machine-row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
 }
 
 function orgRow(org) {
@@ -533,6 +589,14 @@ function orgRow(org) {
 
 function installCommand(profile, machine) {
   return `curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile ${profile} --machine ${machine}`;
+}
+
+function uninstallCommand() {
+  return "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/uninstall.sh | bash";
+}
+
+function accountRef(account) {
+  return account.handle || account.account_number;
 }
 
 function profileHtml(profile) {
@@ -551,7 +615,7 @@ function profileHtml(profile) {
         <div>
           <div class="badges"><span>${esc(profile.account.kind)} profile</span>${hasHandle || hasLabel ? "" : `<span>anonymous</span>`}</div>
           <h1>${esc(displayName)}</h1>
-          <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active UTC days</p>
+          <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active days</p>
         </div>
         <div class="actions"><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
       </header>
@@ -562,7 +626,7 @@ function profileHtml(profile) {
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
       </section>
       ${heatmap(profile.days, { title: "Last 365 days", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
-      ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "UTC days, grouped by calendar year" })}
+      ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" })}
       <details class="embed-disclosure">
         <summary>Embed or share this graph</summary>
         <div class="snippets">
@@ -599,7 +663,7 @@ function svgEmbed(profile) {
   <rect width="100%" height="100%" rx="8" fill="#0b0c0f"/>
   <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#263241"/>
   <text x="22" y="30" fill="#edf1f7" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
-  <text x="22" y="50" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active UTC days</text>
+  <text x="22" y="50" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active days</text>
   ${rects}
   <text x="22" y="164" fill="#9faab8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
   <rect x="55" y="155" width="10" height="10" rx="2" fill="${colors[0]}"/>
@@ -630,7 +694,7 @@ function heatmap(days, options = {}) {
   const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
   return `<section class="${classes}">
     ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
-    <div class="heatmap-scroll">${heatmapFrame(data, cells.join(""), "Token burn by UTC day")}</div>
+    <div class="heatmap-scroll">${heatmapFrame(data, cells.join(""), "Token burn by day")}</div>
   </section>`;
 }
 
@@ -655,7 +719,7 @@ function heatmapTimeline(days, options = {}) {
       const data = yearHeatmapCellData(days, year);
       const cells = data.map((cell) => heatmapCell(cell)).join("");
       const total = days.filter((day) => day.date_utc.startsWith(String(year))).reduce((sum, day) => sum + day.total_tokens, 0);
-      return `<section class="year-row"><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll">${heatmapFrame(data, cells, `Token burn by UTC day in ${year}`, "year-heatmap")}</div></section>`;
+      return `<section class="year-row"><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll">${heatmapFrame(data, cells, `Token burn by day in ${year}`, "year-heatmap")}</div></section>`;
     }).join("")}</div>
   </section>`;
 }
@@ -939,15 +1003,16 @@ function dashboardScript(profileRef) {
       row.append(wrap, button);
       return row;
     }
-    function machineResult(target, token) {
+    function machineResult(target, machine) {
       target.hidden = false;
       target.innerHTML = "";
       const box = document.createElement("section");
       box.className = "setup";
       const heading = document.createElement("h2");
       heading.textContent = "Machine token created";
-      const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + profileRef + " --machine " + token;
-      box.append(heading, secretRow("Machine token", token), secretRow("Install + sync command", command));
+      const profile = machine.profile || profileRef;
+      const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + profile + " --machine " + machine.token;
+      box.append(heading, secretRow("Machine token", machine.token), secretRow("Install + sync command", command));
       target.appendChild(box);
     }
     function messageFor(data) {
@@ -971,7 +1036,7 @@ function dashboardScript(profileRef) {
       const data = await res.json();
       return { ok: res.ok, data };
     }
-    document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); ok && data.machine ? machineResult(out, data.machine.token) : (out.hidden = false, out.textContent = messageFor(data)); });
+    document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); ok && data.machine ? machineResult(out, data.machine) : (out.hidden = false, out.textContent = messageFor(data)); });
     document.querySelector("[data-handle]")?.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/handles"); ok ? location.reload() : alert(messageFor(data)); });
     document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = ok ? "Verification link sent. Check your email." : messageFor(data); });
     document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); ok && data.org ? location.reload() : (out.hidden = false, out.textContent = messageFor(data)); });
