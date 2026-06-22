@@ -574,10 +574,9 @@ async function appPage(request, env) {
 function machineRow(machine, fallbackProfileRef) {
   const profileRef = machine.org_handle || machine.org_account_number || fallbackProfileRef;
   const scope = machine.org_id ? `org ${machine.org_display_name || profileRef}` : "personal profile";
-  const command = machine.token ? installCommand(profileRef, machine.token) : "";
-  const action = command
-    ? `<button type="button" class="secondary copy" data-copy="${esc(command)}">Copy install</button>`
-    : `<span class="row-note">Create a new token to get a copy-ready command.</span>`;
+  const command = machine.token ? installCommand(profileRef, machine.token) : installPromptCommand(profileRef);
+  const note = machine.token ? "" : `<span class="row-note">Prompts for your existing token.</span>`;
+  const action = `<button type="button" class="secondary copy" data-copy="${esc(command)}">Copy install</button>${note}`;
   return `<div class="row machine-row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
 }
 
@@ -589,6 +588,10 @@ function orgRow(org) {
 
 function installCommand(profile, machine) {
   return `curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile ${profile} --machine ${machine}`;
+}
+
+function installPromptCommand(profile) {
+  return `curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile ${profile}`;
 }
 
 function uninstallCommand() {

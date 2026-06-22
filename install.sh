@@ -85,8 +85,11 @@ case "$schedule" in
   *) die "--schedule must be one of: none, hourly, daily" ;;
 esac
 
-if { [ -n "$profile" ] && [ -z "$machine" ]; } || { [ -z "$profile" ] && [ -n "$machine" ]; }; then
-  die "--profile and --machine must be provided together"
+if [ -n "$profile" ] && [ -z "$machine" ] && [ ! -r /dev/tty ]; then
+  die "--profile without --machine requires an interactive shell"
+fi
+if [ -z "$profile" ] && [ -n "$machine" ] && [ ! -r /dev/tty ]; then
+  die "--machine without --profile requires an interactive shell"
 fi
 if [ -z "$profile" ] && [ -n "$schedule" ] && [ "$schedule" != "none" ]; then
   die "--schedule requires --profile and --machine"
@@ -134,17 +137,23 @@ prompt_existing_token() {
   if [ ! -r /dev/tty ]; then
     return
   fi
-  printf "\nConfigure an existing Burnfolio machine token now? [y/N] " > /dev/tty
-  IFS= read -r answer < /dev/tty || answer=""
-  case "$answer" in
-    y|Y|yes|YES) ;;
-    *) return ;;
-  esac
+  if [ -z "$profile" ] && [ -z "$machine" ]; then
+    printf "\nConfigure an existing Burnfolio machine token now? [y/N] " > /dev/tty
+    IFS= read -r answer < /dev/tty || answer=""
+    case "$answer" in
+      y|Y|yes|YES) ;;
+      *) return ;;
+    esac
+  fi
 
-  printf "Profile account number or username: " > /dev/tty
-  IFS= read -r profile < /dev/tty || profile=""
-  printf "Machine token: " > /dev/tty
-  IFS= read -r machine < /dev/tty || machine=""
+  if [ -z "$profile" ]; then
+    printf "Profile account number or username: " > /dev/tty
+    IFS= read -r profile < /dev/tty || profile=""
+  fi
+  if [ -z "$machine" ]; then
+    printf "Machine token: " > /dev/tty
+    IFS= read -r machine < /dev/tty || machine=""
+  fi
 
   if [ -z "$profile" ] || [ -z "$machine" ]; then
     profile=""
@@ -210,7 +219,7 @@ if ! command -v pyro >/dev/null 2>&1 && ! printf '%s' ":$PATH:" | grep -q ":${in
   echo "Note: ${install_dir} is not on PATH. Add it or run ${pyro_path} directly."
 fi
 
-if [ -z "$profile" ] && [ -z "$machine" ]; then
+if [ -z "$profile" ] || [ -z "$machine" ]; then
   prompt_existing_token
 fi
 
