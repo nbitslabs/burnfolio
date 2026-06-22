@@ -1,4 +1,37 @@
 const COOKIE_NAME = "bf_session";
+const RESERVED_HANDLES = new Set([
+  "app",
+  "signup",
+  "signin",
+  "auth",
+  "api",
+  "assets",
+  "embed",
+  "og",
+  "how-we-count",
+  "how_we_count",
+  "howwecount",
+  "install",
+  "uninstall",
+  "admin",
+  "account",
+  "accounts",
+  "org",
+  "orgs",
+  "organization",
+  "organizations",
+  "settings",
+  "support",
+  "help",
+  "docs",
+  "pricing",
+  "terms",
+  "privacy",
+  "security",
+  "status",
+  "burnfolio",
+  "pyro",
+]);
 
 export default {
   async fetch(request, env) {
@@ -23,10 +56,11 @@ async function route(request, env) {
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path === "/") return html(homePage());
-  if (path === "/signup") return html(authPage("signup"));
-  if (path === "/signin") return html(authPage("signin"));
+  if (path === "/signup") return authRoute(request, env, "signup");
+  if (path === "/signin") return authRoute(request, env, "signin");
   if (path === "/how-we-count") return html(howWeCountPage());
   if (path === "/app") return html(await appPage(request, env));
+  if (path === "/app/orgs") return html(await orgsPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
   if (path === "/api/account-login" && request.method === "POST") return accountLogin(request, env);
   if (path === "/api/magic-links" && request.method === "POST") return requestMagicLink(request, env);
@@ -39,6 +73,8 @@ async function route(request, env) {
   if (path.match(/^\/api\/machines\/[^/]+\/token$/) && request.method === "POST") return rotateMachineTokenRoute(request, env, decodeURIComponent(path.split("/")[3]));
   if (path === "/api/orgs" && request.method === "POST") return createOrgRoute(request, env);
   if (path.match(/^\/api\/orgs\/[^/]+\/members$/) && request.method === "POST") return addOrgMemberRoute(request, env, path.split("/")[3]);
+  if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "PATCH") return updateOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
+  if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "DELETE") return removeOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
   if (path === "/api/ingest" && request.method === "POST") return ingest(request, env);
   if (path.match(/^\/api\/profiles\/[^/]+\/stats$/)) return profileStatsRoute(env, decodeURIComponent(path.split("/")[3]));
   if (path.match(/^\/embed\/[^/]+\.svg$/)) return embedSVGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
@@ -52,7 +88,9 @@ async function route(request, env) {
 async function signup(request, env) {
   const body = await readBody(request);
   const email = cleanEmail(body.email);
-  const handle = cleanHandle(body.username || body.handle);
+  const rawHandle = body.username || body.handle;
+  const handle = cleanHandle(rawHandle);
+  if (String(rawHandle || "").trim() && !handle) return json({ error: "invalid_handle" }, 400);
   const user = await createUser(env, { email, handle });
   if (user.error) return json(user, user.status || 400);
   const machine = await createMachine(env, {
@@ -86,12 +124,18 @@ async function accountLogin(request, env) {
   });
 }
 
+async function authRoute(request, env, mode) {
+  const user = await requireUser(request, env);
+  if (user) return redirect("/app");
+  return html(authPage(mode));
+}
+
 async function requestMagicLink(request, env) {
   const body = await readBody(request);
   const email = cleanEmail(body.email);
   if (!email) return json({ error: "invalid_email" }, 400);
 
-  let user = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+  let user = await userByEmail(env, email);
   if (!user) {
     const created = await createUser(env, { email, handle: "" });
     if (created.error) return json(created, created.status || 400);
@@ -119,10 +163,17 @@ async function attachEmail(request, env) {
   const email = cleanEmail(body.email);
   if (!email) return json({ error: "invalid_email" }, 400);
 
-  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+  const existing = await userByEmail(env, email);
   if (existing && existing.id !== user.id) return json({ error: "email_already_claimed" }, 409);
 
-  await env.DB.prepare("UPDATE users SET email = ?, email_verified_at = NULL WHERE id = ?").bind(email, user.id).run();
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO user_emails (user_id, email, is_primary)
+      VALUES (?, ?, COALESCE((SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM user_emails WHERE user_id = ?), 1))
+      ON CONFLICT(email) DO NOTHING
+    `).bind(user.id, email, user.id),
+    env.DB.prepare("UPDATE users SET email = COALESCE(email, ?) WHERE id = ?").bind(email, user.id),
+  ]);
   const token = randomToken("bfl");
   await env.DB.prepare(`
     INSERT INTO magic_links (token_hash, user_id, email, expires_at)
@@ -151,7 +202,7 @@ async function consumeMagicLink(request, env) {
   if (!token) return html(authResultPage("Missing sign-in token.", false), 400);
   const tokenHash = await sha256(token);
   const row = await env.DB.prepare(`
-    SELECT user_id FROM magic_links
+    SELECT user_id, email FROM magic_links
     WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > datetime('now')
   `).bind(tokenHash).first();
   if (!row) return html(authResultPage("This sign-in link is expired or already used.", false), 400);
@@ -160,6 +211,7 @@ async function consumeMagicLink(request, env) {
   await env.DB.batch([
     env.DB.prepare("UPDATE magic_links SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE token_hash = ?").bind(tokenHash),
     env.DB.prepare("UPDATE users SET email_verified_at = COALESCE(email_verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?").bind(row.user_id),
+    env.DB.prepare("UPDATE user_emails SET verified_at = COALESCE(verified_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE user_id = ? AND email = ?").bind(row.user_id, row.email),
   ]);
   return new Response(authResultPage("Signed in. Redirecting to your dashboard.", true), {
     status: 200,
@@ -190,7 +242,8 @@ async function claimHandle(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
   const body = await readBody(request);
-  const handle = cleanHandle(body.handle || body.username);
+  const rawHandle = body.handle || body.username;
+  const handle = cleanHandle(rawHandle);
   if (!handle) return json({ error: "invalid_handle" }, 400);
   try {
     await env.DB.prepare(`
@@ -260,7 +313,9 @@ async function createOrgRoute(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
   const body = await readBody(request);
-  const handle = cleanHandle(body.handle || body.username);
+  const rawHandle = body.handle || body.username;
+  const handle = cleanHandle(rawHandle);
+  if (String(rawHandle || "").trim() && !handle) return json({ error: "invalid_handle" }, 400);
   const displayName = cleanText(body.name || handle || "Organization", 80);
   const org = await createOrg(env, { handle, displayName, ownerUserID: user.id });
   if (org.error) return json(org, 409);
@@ -272,17 +327,49 @@ async function addOrgMemberRoute(request, env, orgRef) {
   if (!user) return json({ error: "unauthorized" }, 401);
   const org = await resolveAccount(env, orgRef);
   if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
-  const admin = await env.DB.prepare("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?").bind(org.id, user.id).first();
-  if (!admin || admin.role !== "admin") return json({ error: "forbidden" }, 403);
+  const actor = await membershipRole(env, org.id, user.id);
+  if (!canManageOrg(actor)) return json({ error: "forbidden" }, 403);
   const body = await readBody(request);
   const member = await resolveAccount(env, body.user || body.account || body.handle);
   if (!member || member.kind !== "user") return json({ error: "user_not_found" }, 404);
-  const role = body.role === "admin" ? "admin" : "member";
-  await env.DB.prepare(`
-    INSERT INTO memberships (org_id, user_id, role)
-    VALUES (?, ?, ?)
-    ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role
-  `).bind(org.id, member.id, role).run();
+  const role = cleanRole(body.role);
+  if (role === "owner" && actor !== "owner") return json({ error: "owner_required" }, 403);
+  await setOrgMemberRole(env, org.id, member.id, role);
+  return json({ ok: true });
+}
+
+async function updateOrgMemberRoute(request, env, orgRef, memberRef) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const org = await resolveAccount(env, orgRef);
+  if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
+  const actor = await membershipRole(env, org.id, user.id);
+  if (!canManageOrg(actor)) return json({ error: "forbidden" }, 403);
+  const member = await resolveAccount(env, memberRef);
+  if (!member || member.kind !== "user") return json({ error: "user_not_found" }, 404);
+  const current = await membershipRole(env, org.id, member.id);
+  if (!current) return json({ error: "member_not_found" }, 404);
+  const body = await readBody(request);
+  const role = cleanRole(body.role);
+  if (role === "owner" && actor !== "owner") return json({ error: "owner_required" }, 403);
+  if (current === "owner" && role !== "owner") return json({ error: "owner_transfer_required" }, 409);
+  await setOrgMemberRole(env, org.id, member.id, role);
+  return json({ ok: true });
+}
+
+async function removeOrgMemberRoute(request, env, orgRef, memberRef) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const org = await resolveAccount(env, orgRef);
+  if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
+  const actor = await membershipRole(env, org.id, user.id);
+  if (!canManageOrg(actor)) return json({ error: "forbidden" }, 403);
+  const member = await resolveAccount(env, memberRef);
+  if (!member || member.kind !== "user") return json({ error: "user_not_found" }, 404);
+  const current = await membershipRole(env, org.id, member.id);
+  if (!current) return json({ error: "member_not_found" }, 404);
+  if (current === "owner") return json({ error: "owner_cannot_be_removed" }, 409);
+  await env.DB.prepare("DELETE FROM memberships WHERE org_id = ? AND user_id = ?").bind(org.id, member.id).run();
   return json({ ok: true });
 }
 
@@ -408,12 +495,13 @@ async function createUser(env, { email, handle }) {
     env.DB.prepare("INSERT INTO accounts (id, account_number, kind, display_name) VALUES (?, ?, 'user', ?)").bind(id, accountNumber, handle || "Anonymous builder"),
     env.DB.prepare("INSERT INTO users (id, email, access_key_hash) VALUES (?, ?, ?)").bind(id, email || null, await sha256(accountKey)),
   ];
+  if (email) statements.push(env.DB.prepare("INSERT INTO user_emails (user_id, email, is_primary) VALUES (?, ?, 1)").bind(id, email));
   if (handle) statements.push(env.DB.prepare("INSERT INTO handles (handle, account_id) VALUES (?, ?)").bind(handle, id));
   try {
     await env.DB.batch(statements);
   } catch (error) {
     const message = String(error && error.message ? error.message : error);
-    if (message.includes("users.email")) return { error: "email_already_claimed", status: 409 };
+    if (message.includes("users.email") || message.includes("user_emails")) return { error: "email_already_claimed", status: 409 };
     if (message.includes("handles")) return { error: "handle_unavailable", status: 409 };
     throw error;
   }
@@ -426,7 +514,7 @@ async function createOrg(env, { handle, displayName, ownerUserID }) {
   const statements = [
     env.DB.prepare("INSERT INTO accounts (id, account_number, kind, display_name) VALUES (?, ?, 'org', ?)").bind(id, accountNumber, displayName),
     env.DB.prepare("INSERT INTO orgs (id) VALUES (?)").bind(id),
-    env.DB.prepare("INSERT INTO memberships (org_id, user_id, role) VALUES (?, ?, 'admin')").bind(id, ownerUserID),
+    env.DB.prepare("INSERT INTO memberships (org_id, user_id, role) VALUES (?, ?, 'owner')").bind(id, ownerUserID),
   ];
   if (handle) statements.push(env.DB.prepare("INSERT INTO handles (handle, account_id) VALUES (?, ?)").bind(handle, id));
   try {
@@ -464,6 +552,58 @@ async function machineRows(env, userID) {
     WHERE m.user_id = ?
     ORDER BY m.created_at DESC
   `).bind(userID).all();
+}
+
+async function emailRows(env, userID) {
+  const rows = await env.DB.prepare(`
+    SELECT email, verified_at, is_primary
+    FROM user_emails
+    WHERE user_id = ?
+    ORDER BY is_primary DESC, created_at ASC, email ASC
+  `).bind(userID).all();
+  return rows.results || [];
+}
+
+async function userByEmail(env, email) {
+  return env.DB.prepare(`
+    SELECT u.id
+    FROM users u
+    LEFT JOIN user_emails ue ON ue.user_id = u.id
+    WHERE u.email = ? OR ue.email = ?
+    LIMIT 1
+  `).bind(email, email).first();
+}
+
+async function membershipRole(env, orgID, userID) {
+  const row = await env.DB.prepare("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?").bind(orgID, userID).first();
+  return row ? row.role : "";
+}
+
+function canManageOrg(role) {
+  return role === "owner" || role === "admin";
+}
+
+function cleanRole(value) {
+  return ["member", "admin", "owner"].includes(value) ? value : "member";
+}
+
+async function setOrgMemberRole(env, orgID, userID, role) {
+  if (role === "owner") {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE memberships SET role = 'admin' WHERE org_id = ? AND role = 'owner'").bind(orgID),
+      env.DB.prepare(`
+        INSERT INTO memberships (org_id, user_id, role)
+        VALUES (?, ?, 'owner')
+        ON CONFLICT(org_id, user_id) DO UPDATE SET role = 'owner'
+      `).bind(orgID, userID),
+    ]);
+    return;
+  }
+  await env.DB.prepare(`
+    INSERT INTO memberships (org_id, user_id, role)
+    VALUES (?, ?, ?)
+    ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role
+  `).bind(orgID, userID, role).run();
 }
 
 function machineCanSyncToAccount(machine, account) {
@@ -529,11 +669,11 @@ function homePage() {
         </div>
         <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine.</p>
         </div>
-        <section class="preview">
-          <div class="preview-top">
+        <section class="showcase">
+          <div class="showcase-top">
             <div><span>Public burn graph</span><strong>8.4B tokens burned</strong></div>
           </div>
-          ${heatmap(sampleDays(), { span: 365, title: "Last 365 days", subtitle: "Burn graph preview" })}
+          ${heatmap(demoDays(), { span: 365, title: "Last 365 days", subtitle: "Burn graph" })}
           <div class="steps">
             <span>Create a profile</span>
             <span>Run <code>pyro</code></span>
@@ -620,7 +760,7 @@ async function appPage(request, env) {
   const user = await requireUser(request, env);
   if (!user) return authPage("signin");
   const account = await accountView(env, user.id);
-  const userInfo = await env.DB.prepare("SELECT email, email_verified_at FROM users WHERE id = ?").bind(user.id).first();
+  const emails = await emailRows(env, user.id);
   const machines = await machineRows(env, user.id);
   const orgs = await env.DB.prepare(`
     SELECT a.account_number, h.handle, a.display_name, m.role
@@ -638,10 +778,13 @@ async function appPage(request, env) {
   const handleControl = account.handle
     ? `<div class="profile-field"><span>Username</span><strong>${esc(account.handle)}</strong></div>`
     : `<form class="form-stack" data-handle><label for="profile-handle">Username</label><div class="form-row"><input id="profile-handle" name="handle" placeholder="claim username"><button>Save</button></div></form>`;
+  const emailSummary = emails.length
+    ? ` · ${esc(emails[0].email)}${emails[0].verified_at ? " verified" : " pending"}`
+    : "";
   return layout("Burnfolio app", `
     <main class="dash">
       <header class="dash-head">
-        <div><p class="eyebrow">Dashboard</p><h1>${esc(account.handle || "Anonymous builder")}</h1><p class="muted">Account <code>${esc(account.account_number)}</code>${userInfo.email ? ` · ${esc(userInfo.email)}${userInfo.email_verified_at ? " verified" : " unverified"}` : ""}</p></div>
+        <div><p class="eyebrow">Dashboard</p><h1>${esc(account.handle || "Anonymous builder")}</h1><p class="muted">Account <code>${esc(account.account_number)}</code>${emailSummary}</p></div>
         <div class="actions"><a class="button secondary" href="/${esc(profileRef)}">Public profile</a><button class="secondary" data-logout>Log out</button></div>
       </header>
       <div class="dash-grid">
@@ -659,7 +802,8 @@ async function appPage(request, env) {
         <section class="panel">
           <div class="section-head"><div><h2>Profile</h2><p class="muted">${esc(profileHelp)}</p></div></div>
           ${handleControl}
-          <form class="form-stack" data-email><label for="profile-email">Email</label><div class="form-row"><input id="profile-email" name="email" placeholder="optional email for magic links" autocomplete="email"><button class="secondary">Add email</button></div></form>
+          <div class="email-list">${emails.map(emailRow).join("") || emptyState("No emails linked", "Add an email to use magic links and recover this profile.")}</div>
+          <form class="form-stack" data-email><label for="profile-email">Add another email</label><div class="form-row"><input id="profile-email" name="email" placeholder="you@example.com" autocomplete="email"><button class="secondary">Send verification</button></div></form>
           <pre class="result" data-email-result hidden></pre>
         </section>
         <section class="panel">
@@ -674,6 +818,87 @@ async function appPage(request, env) {
   `);
 }
 
+async function orgsPage(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return authPage("signin");
+  const account = await accountView(env, user.id);
+  const profileRef = account.handle || account.account_number;
+  const orgs = await env.DB.prepare(`
+    SELECT a.id, a.account_number, h.handle, a.display_name, m.role
+    FROM memberships m
+    JOIN accounts a ON a.id = m.org_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE m.user_id = ?
+    ORDER BY lower(a.display_name), a.created_at DESC
+  `).bind(user.id).all();
+  const requested = new URL(request.url).searchParams.get("org") || "";
+  const selected = orgs.results.find((org) => accountRef(org) === requested || org.account_number === requested) || orgs.results[0] || null;
+  const members = selected ? await orgMemberRows(env, selected.id) : [];
+  const canManage = selected && canManageOrg(selected.role);
+  return layout("Organizations — Burnfolio", `
+    <main class="dash org-management">
+      <header class="dash-head">
+        <div><p class="eyebrow">Organizations</p><h1>Manage organizations</h1><p class="muted">Separate team membership, roles, and ownership from your personal profile.</p></div>
+        <div class="actions"><a class="button secondary" href="/app">Dashboard</a><a class="button secondary" href="/${esc(profileRef)}">Public profile</a></div>
+      </header>
+      <section class="org-shell">
+        <aside class="panel org-sidebar">
+          <div class="section-head"><div><h2>Your orgs</h2><p class="muted">You can belong to more than one org.</p></div></div>
+          <div class="org-nav">${orgs.results.map((org) => {
+            const ref = accountRef(org);
+            const active = selected && selected.id === org.id;
+            return `<a class="${active ? "active" : ""}" href="/app/orgs?org=${encodeURIComponent(ref)}"><strong>${esc(org.display_name || ref)}</strong><span>${esc(ref)} · ${esc(org.role)}</span></a>`;
+          }).join("") || emptyState("No organizations yet", "Create one from the dashboard.")}</div>
+        </aside>
+        <section class="panel org-detail">
+          ${selected ? orgDetail(selected, members, canManage) : emptyState("No organization selected", "Create an organization before managing members.")}
+        </section>
+      </section>
+    </main>
+    <script>${orgManagementScript()}</script>
+  `);
+}
+
+async function orgMemberRows(env, orgID) {
+  const rows = await env.DB.prepare(`
+    SELECT a.account_number, h.handle, a.display_name, m.role, m.created_at
+    FROM memberships m
+    JOIN accounts a ON a.id = m.user_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE m.org_id = ?
+    ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, lower(COALESCE(h.handle, a.display_name, a.account_number))
+  `).bind(orgID).all();
+  return rows.results || [];
+}
+
+function orgDetail(org, members, canManage) {
+  const ref = accountRef(org);
+  return `
+    <div class="section-head"><div><h2>${esc(org.display_name || ref)}</h2><p class="muted"><a href="/${esc(ref)}">/${esc(ref)}</a> · your role is ${esc(org.role)}</p></div></div>
+    ${canManage ? `<form class="form-stack org-add-member" data-add-member data-org="${esc(ref)}"><label for="org-member">Add a member or admin</label><div class="form-row"><input id="org-member" name="user" placeholder="username or account number"><select name="role"><option value="member">member</option><option value="admin">admin</option>${org.role === "owner" ? `<option value="owner">owner (transfer)</option>` : ""}</select><button>Add</button></div></form>` : `<p class="muted">Members can view the org here. Ask an admin or owner to change roles.</p>`}
+    <div class="member-list">${members.map((member) => orgMemberRow(org, member, canManage)).join("")}</div>
+  `;
+}
+
+function orgMemberRow(org, member, canManage) {
+  const orgRef = accountRef(org);
+  const memberRef = member.handle || member.account_number;
+  const isOwner = member.role === "owner";
+  const controls = canManage
+    ? `<div class="row-actions">
+        <form data-member-role data-org="${esc(orgRef)}" data-member="${esc(memberRef)}">
+          <select name="role" ${isOwner ? "disabled" : ""}>
+            <option value="member"${member.role === "member" ? " selected" : ""}>member</option>
+            <option value="admin"${member.role === "admin" ? " selected" : ""}>admin</option>
+            ${org.role === "owner" ? `<option value="owner"${member.role === "owner" ? " selected" : ""}>owner${isOwner ? "" : " (transfer)"}</option>` : ""}
+          </select>
+        </form>
+        ${isOwner ? `<span class="row-note">Owner cannot be removed.</span>` : `<button type="button" class="secondary" data-remove-member data-org="${esc(orgRef)}" data-member="${esc(memberRef)}">Remove</button>`}
+      </div>`
+    : "";
+  return `<div class="row member-row"><div><strong>${esc(member.handle || member.display_name || member.account_number)}</strong><span>${esc(member.account_number)} · ${esc(member.role)}</span></div>${controls}</div>`;
+}
+
 function machineRow(machine, fallbackProfileRef) {
   const profileRef = machine.org_handle || machine.org_account_number || fallbackProfileRef;
   const scope = machine.org_id ? `org ${machine.org_display_name || profileRef}` : "personal profile";
@@ -685,8 +910,12 @@ function machineRow(machine, fallbackProfileRef) {
 
 function orgRow(org) {
   const ref = org.handle || org.account_number;
-  const adminForm = org.role === "admin" ? `<form class="member-form" data-add-member data-org="${esc(ref)}"><label class="sr-only" for="member-${esc(ref)}">User account or username</label><input id="member-${esc(ref)}" name="user" placeholder="user account or username"><select name="role"><option value="member">member</option><option value="admin">admin</option></select><button>Add</button></form>` : "";
-  return `<div class="row"><div><strong><a href="/${esc(ref)}">${esc(ref)}</a></strong><span>${esc(org.display_name || "Organization")} · ${esc(org.role)}</span></div>${adminForm}</div>`;
+  return `<div class="row"><div><strong><a href="/${esc(ref)}">${esc(ref)}</a></strong><span>${esc(org.display_name || "Organization")} · ${esc(org.role)}</span></div><div class="row-actions"><a class="button secondary" href="/app/orgs?org=${encodeURIComponent(ref)}">Manage</a></div></div>`;
+}
+
+function emailRow(row) {
+  const state = row.verified_at ? "Verified" : "Pending verification";
+  return `<div class="email-row"><div><strong>${esc(row.email)}</strong><span>${esc(state)}${row.is_primary ? " · primary" : ""}</span></div></div>`;
 }
 
 function installCommand(profile, machine) {
@@ -1168,7 +1397,7 @@ function layout(title, body, meta = {}) {
 <meta name="twitter:title" content="${esc(title)}">
 <meta name="twitter:description" content="${esc(description)}">
 <meta name="twitter:image" content="${esc(image)}">
-<style>${css()}</style></head><body><nav><a class="nav-brand" href="/"><img src="/assets/logo.svg" alt="" width="28" height="28"><span>Burnfolio</span></a><a href="/app">App</a></nav>${body}<script>${globalScript()}</script></body></html>`;
+<style>${css()}</style></head><body><nav><a class="nav-brand" href="/"><img src="/assets/logo.svg" alt="" width="28" height="28"><span>Burnfolio</span></a><div class="nav-links"><a href="/how-we-count">How we count</a><a href="/signin">Sign in</a><a class="nav-cta" href="/signup">Create graph</a><a href="/app">App</a></div></nav>${body}<script>${globalScript()}</script></body></html>`;
 }
 
 function heatmap(days, options = {}) {
@@ -1434,6 +1663,7 @@ function signupScript() {
         email_send_failed: "The email could not be sent. Try again shortly.",
         missing_account_credentials: "Enter both the account number and account key.",
         invalid_account_credentials: "The account number or account key is incorrect.",
+        invalid_handle: "Choose a different username. Some app paths are reserved.",
         handle_unavailable: "That username is already taken."
       };
       return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
@@ -1535,7 +1765,11 @@ function dashboardScript(profileRef) {
         org_handle_unavailable: "That organization username is already taken.",
         org_not_found: "Organization not found.",
         machine_not_found: "That machine was not found.",
-        forbidden: "Only org admins can add members.",
+        forbidden: "Only org admins or owners can manage members.",
+        owner_required: "Only the current owner can transfer ownership.",
+        owner_transfer_required: "Transfer ownership to another member before changing the current owner.",
+        owner_cannot_be_removed: "The owner cannot be removed.",
+        member_not_found: "That member was not found.",
         user_not_found: "No user was found for that account or username."
       };
       return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
@@ -1588,14 +1822,58 @@ function dashboardScript(profileRef) {
       });
     });
     document.querySelector("[data-handle]")?.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/handles"); ok ? location.reload() : alert(messageFor(data)); });
-    document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = ok ? "Verification link sent. Check your email." : messageFor(data); });
+    document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = ok ? "Verification link sent. This email will show as pending until the link is opened." : messageFor(data); });
     document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); ok && data.org ? location.reload() : (out.hidden = false, out.textContent = messageFor(data)); });
-    document.querySelectorAll("[data-add-member]").forEach(form => form.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs/" + e.currentTarget.dataset.org + "/members"); ok ? location.reload() : alert(messageFor(data)); }));
     document.querySelector("[data-logout]").addEventListener("click", async () => { await fetch("/api/logout", { method:"POST" }); location.href = "/"; });
   `;
 }
 
-function sampleDays() {
+function orgManagementScript() {
+  return `
+    function messageFor(data) {
+      const messages = {
+        unauthorized: "Your session expired. Sign in again.",
+        invalid_handle: "Choose a different username. Some app paths are reserved.",
+        org_not_found: "Organization not found.",
+        forbidden: "Only org admins or owners can manage members.",
+        owner_required: "Only the current owner can transfer ownership.",
+        owner_transfer_required: "Transfer ownership to another member before changing the current owner.",
+        owner_cannot_be_removed: "The owner cannot be removed.",
+        member_not_found: "That member was not found.",
+        user_not_found: "No user was found for that account or username."
+      };
+      return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
+    }
+    async function send(url, method, body) {
+      const res = await fetch(url, {
+        method,
+        headers: body ? { "Content-Type":"application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, data };
+    }
+    document.querySelectorAll("[data-add-member]").forEach(form => form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const body = Object.fromEntries(new FormData(form).entries());
+      const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/members", "POST", body);
+      ok ? location.reload() : alert(messageFor(data));
+    }));
+    document.querySelectorAll("[data-member-role] select").forEach(select => select.addEventListener("change", async event => {
+      const form = event.target.closest("[data-member-role]");
+      const body = Object.fromEntries(new FormData(form).entries());
+      const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/members/" + encodeURIComponent(form.dataset.member), "PATCH", body);
+      ok ? location.reload() : alert(messageFor(data));
+    }));
+    document.querySelectorAll("[data-remove-member]").forEach(button => button.addEventListener("click", async () => {
+      if (!confirm("Remove this member from the organization?")) return;
+      const { ok, data } = await send("/api/orgs/" + encodeURIComponent(button.dataset.org) + "/members/" + encodeURIComponent(button.dataset.member), "DELETE");
+      ok ? location.reload() : alert(messageFor(data));
+    }));
+  `;
+}
+
+function demoDays() {
   const today = new Date();
   const days = [];
   for (let i = 364; i >= 0; i--) {
@@ -1672,6 +1950,10 @@ function json(data, status = 200, headers = {}) {
 
 function html(body, status = 200) {
   return new Response(body, { status, headers: { "Content-Type": "text/html; charset=utf-8" } });
+}
+
+function redirect(location, status = 302) {
+  return new Response("", { status, headers: { Location: location } });
 }
 
 function svgResponse(body, status = 200) {
@@ -1751,6 +2033,7 @@ function cleanHandle(value) {
   value = String(value || "").trim().toLowerCase();
   if (!value) return "";
   if (!value.match(/^[a-z0-9][a-z0-9_-]{2,31}$/)) return "";
+  if (RESERVED_HANDLES.has(value)) return "";
   return value;
 }
 
