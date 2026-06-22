@@ -485,6 +485,10 @@ async function appPage(request, env) {
     ORDER BY a.created_at DESC
   `).bind(user.id).all();
   const profileRef = account.handle || account.account_number;
+  const profileHelp = account.handle ? "Manage your public identity and recovery email." : "Claim a readable username and attach an email for recovery.";
+  const handleControl = account.handle
+    ? `<div class="profile-field"><span>Username</span><strong>${esc(account.handle)}</strong></div>`
+    : `<form class="form-stack" data-handle><label for="profile-handle">Username</label><div class="form-row"><input id="profile-handle" name="handle" placeholder="claim username"><button>Save</button></div></form>`;
   return layout("Burnfolio app", `
     <main class="dash">
       <header class="dash-head">
@@ -500,8 +504,8 @@ async function appPage(request, env) {
           <div class="list">${machines.results.map(machineRow).join("") || emptyState("No machines connected", "Create a token and sync with pyro to start filling your burn graph.")}</div>
         </section>
         <section class="panel">
-          <div class="section-head"><div><h2>Profile</h2><p class="muted">Claim a readable username and attach an email for recovery.</p></div></div>
-          <form class="form-stack" data-handle><label for="profile-handle">Username</label><div class="form-row"><input id="profile-handle" name="handle" placeholder="claim username"><button>Save</button></div></form>
+          <div class="section-head"><div><h2>Profile</h2><p class="muted">${esc(profileHelp)}</p></div></div>
+          ${handleControl}
           <form class="form-stack" data-email><label for="profile-email">Email</label><div class="form-row"><input id="profile-email" name="email" placeholder="optional email for magic links" autocomplete="email"><button class="secondary">Add email</button></div></form>
           <pre class="result" data-email-result hidden></pre>
         </section>
@@ -968,7 +972,7 @@ function dashboardScript(profileRef) {
       return { ok: res.ok, data };
     }
     document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); ok && data.machine ? machineResult(out, data.machine.token) : (out.hidden = false, out.textContent = messageFor(data)); });
-    document.querySelector("[data-handle]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/handles"); ok ? location.reload() : alert(messageFor(data)); });
+    document.querySelector("[data-handle]")?.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/handles"); ok ? location.reload() : alert(messageFor(data)); });
     document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = ok ? "Verification link sent. Check your email." : messageFor(data); });
     document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); ok && data.org ? location.reload() : (out.hidden = false, out.textContent = messageFor(data)); });
     document.querySelectorAll("[data-add-member]").forEach(form => form.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs/" + e.currentTarget.dataset.org + "/members"); ok ? location.reload() : alert(messageFor(data)); }));

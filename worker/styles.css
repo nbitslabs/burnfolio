@@ -571,6 +571,25 @@ form {
   font-size: 13px;
   font-weight: 800;
 }
+.profile-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(110, 132, 160, .22);
+  border-radius: 8px;
+  background: rgba(9, 14, 20, .48);
+}
+.profile-field span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.profile-field strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
 .command-preview {
   margin: 12px 0 0;
 }
