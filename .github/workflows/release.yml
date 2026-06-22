@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          out="dist/pyro_${version}_${GOOS}_${GOARCH}"
+          mkdir -p "$out"
+          bin="pyro"
+          if [ "$GOOS" = "windows" ]; then
+            bin="pyro.exe"
+          fi
+          go build -trimpath -ldflags "-s -w" -o "${out}/${bin}" ./cmd/pyro
+          cp README.md LICENSE* "$out/" 2>/dev/null || true
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd "$out" && zip -qr "../pyro_${version}_${GOOS}_${GOARCH}.zip" .)
+          else
+            tar -C "$out" -czf "dist/pyro_${version}_${GOOS}_${GOARCH}.tar.gz" .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyro_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/pyro_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum pyro_* > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/pyro_*
+            dist/checksums.txt
+          generate_release_notes: true

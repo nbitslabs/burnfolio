@@ -13,13 +13,70 @@ Current collectors:
 - OpenCode: `~/.config/opencode`
 - Pi: `~/.pi/agent/sessions`
 
-## Usage
+## Install Pyro
 
 ```sh
-go run ./cmd/pyro
+curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash
 ```
 
-Build or install the local CLI:
+Burnfolio publishes pre-built `pyro` binaries for every release tag on GitHub:
+
+- Linux: `amd64`, `arm64`
+- macOS: `amd64`, `arm64`
+- Windows: `amd64`, `arm64`
+
+Release assets are available at
+`https://github.com/nbitslabs/burnfolio/releases`.
+
+The installer downloads the latest release binary, installs it to
+`/usr/local/bin` or `~/.local/bin`, and can optionally run an immediate sync.
+
+For a new machine token from the dashboard, copy the generated one-liner:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile <account-number-or-username> --machine <machine-token>
+```
+
+The installer asks whether to set up automatic sync with cron: `none`, `hourly`,
+or `daily`. For non-interactive setup, pass the schedule explicitly:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- \
+  --profile <account-number-or-username> \
+  --machine <machine-token> \
+  --schedule daily
+```
+
+Useful installer flags:
+
+```sh
+--profile <account-or-username>
+--machine <machine-token>
+--schedule <none|hourly|daily>
+--providers claude,codex,opencode,pi
+--server https://burnfolio.ai
+--install-dir ~/.local/bin
+--version v0.1.0
+```
+
+## CLI Usage
+
+Run a local summary without syncing:
+
+```sh
+pyro
+```
+
+Useful CLI flags:
+
+```sh
+pyro --providers claude,codex
+pyro --json
+pyro --home /path/to/home
+pyro --profile bf_ab12cd34 --machine bfm_...
+```
+
+Build from source for local development:
 
 ```sh
 make build
@@ -27,15 +84,6 @@ make build
 
 go install ./cmd/pyro
 pyro
-```
-
-Useful flags:
-
-```sh
-pyro --providers claude,codex
-pyro --json
-pyro --home /path/to/home
-pyro --profile bf_ab12cd34 --machine bfm_...
 ```
 
 The table output is grouped by UTC date, CLI, and model. JSON output includes
@@ -52,10 +100,10 @@ number, account key, machine token, and a ready-to-run sync command. Save the
 account key: it is the private credential used with the public account number to
 sign back in before adding an email or username.
 
-Run the generated command locally:
+Run the generated install + sync command locally:
 
 ```sh
-pyro --profile <account-number-or-username> --machine <machine-token>
+curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile <account-number-or-username> --machine <machine-token>
 ```
 
 From the dashboard you can claim a username, attach an optional email for magic

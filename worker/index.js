@@ -495,7 +495,7 @@ async function appPage(request, env) {
         <section class="panel primary-panel">
           <div class="section-head"><div><h2>Connect a machine</h2><p class="muted">Create a token, then run the generated command locally.</p></div></div>
           <form class="form-row" data-machine><label class="sr-only" for="machine-name">Machine name</label><input id="machine-name" name="name" placeholder="machine name, e.g. macbook-pro"><button>Create token</button></form>
-          <p class="command-preview"><code>pyro --profile ${esc(profileRef)} --machine &lt;token&gt;</code></p>
+          <p class="command-preview"><code>${esc(installCommand(profileRef, "<token>"))}</code></p>
           <div class="result" data-machine-result hidden></div>
           <div class="list">${machines.results.map(machineRow).join("") || emptyState("No machines connected", "Create a token and sync with pyro to start filling your burn graph.")}</div>
         </section>
@@ -525,6 +525,10 @@ function orgRow(org) {
   const ref = org.handle || org.account_number;
   const adminForm = org.role === "admin" ? `<form class="member-form" data-add-member data-org="${esc(ref)}"><label class="sr-only" for="member-${esc(ref)}">User account or username</label><input id="member-${esc(ref)}" name="user" placeholder="user account or username"><select name="role"><option value="member">member</option><option value="admin">admin</option></select><button>Add</button></form>` : "";
   return `<div class="row"><div><strong><a href="/${esc(ref)}">${esc(ref)}</a></strong><span>${esc(org.display_name || "Organization")} · ${esc(org.role)}</span></div>${adminForm}</div>`;
+}
+
+function installCommand(profile, machine) {
+  return `curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile ${profile} --machine ${machine}`;
 }
 
 function profileHtml(profile) {
@@ -840,12 +844,12 @@ function signupScript() {
         return;
       }
       const profile = data.account.handle || data.account.account_number;
-      const command = "pyro --profile " + profile + " --machine " + data.machine.token;
+      const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + profile + " --machine " + data.machine.token;
       setupResult(result, [
         { label: "Account number", value: data.account.account_number },
         { label: "Account key", value: data.account_key },
         { label: "Machine token", value: data.machine.token },
-        { label: "Sync command", value: command }
+        { label: "Install + sync command", value: command }
       ], "Save the account key now. It is the private credential for anonymous sign-in.");
     });
     document.querySelector("[data-login]").addEventListener("submit", async (event) => {
@@ -907,8 +911,8 @@ function dashboardScript(profileRef) {
       box.className = "setup";
       const heading = document.createElement("h2");
       heading.textContent = "Machine token created";
-      const command = "pyro --profile " + profileRef + " --machine " + token;
-      box.append(heading, secretRow("Machine token", token), secretRow("Sync command", command));
+      const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + profileRef + " --machine " + token;
+      box.append(heading, secretRow("Machine token", token), secretRow("Install + sync command", command));
       target.appendChild(box);
     }
     function messageFor(data) {
