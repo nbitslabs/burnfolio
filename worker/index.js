@@ -679,7 +679,7 @@ function homePage(isSignedIn = false) {
           <div class="showcase-top">
             <div><span>Public burn graph</span><strong>8.4B tokens burned</strong></div>
           </div>
-          ${heatmap(demoDays(), { span: 365, title: "Last 365 days", subtitle: "Burn graph" })}
+          ${heatmap(demoDays(), { title: "Past year", subtitle: "Burn graph" })}
           <div class="steps">
             <span>Create a profile</span>
             <span>Run <code>pyro</code></span>
@@ -964,7 +964,7 @@ function profileHtml(profile, isSignedIn = false) {
         ${statCard("Best day", formatCompact(stats.best_day_tokens), stats.best_day ? formatDate(stats.best_day) : "No activity yet")}
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
       </section>
-      ${heatmap(profile.days, { title: "Last 365 days", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
+      ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
       ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" })}
       <details class="embed-disclosure">
         <summary>Embed or share this graph</summary>
@@ -993,7 +993,7 @@ function embedHtml(profile) {
 
 function svgEmbed(profile) {
   const name = profile.account.handle || profile.account.account_number;
-  const cells = heatmapCellData(profile.days, 365, heatmapScale(profile.days));
+  const cells = heatmapCellData(profile.days, heatmapScale(profile.days));
   const cellSize = 10;
   const gap = 4;
   const left = 22;
@@ -1004,7 +1004,7 @@ function svgEmbed(profile) {
     const y = top + (i % 7) * (cellSize + gap);
     return `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="2" fill="${colors[cell.level]}"><title>${esc(cell.date)}: ${formatInt(cell.value)}</title></rect>`;
   }).join("");
-  const width = left * 2 + 53 * (cellSize + gap);
+  const width = left * 2 + Math.ceil(cells.length / 7) * (cellSize + gap);
   const height = 184;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(name)} Burnfolio token burn graph">
   <rect width="100%" height="100%" rx="8" fill="#1C140D"/>
@@ -1026,7 +1026,7 @@ function svgEmbed(profile) {
 function ogProfileSVG(profile) {
   const ref = profile.account.handle || profile.account.account_number;
   const displayName = profile.account.handle || profile.account.display_name || profile.account.account_number;
-  const cells = heatmapCellData(profile.days, 365, heatmapScale(profile.days));
+  const cells = heatmapCellData(profile.days, heatmapScale(profile.days));
   const colors = ["#F2E7D9", "#FBD089", "#F99B3C", "#F2611C", "#D6300B"];
   const cell = 10;
   const gap = 4;
@@ -1069,7 +1069,7 @@ function ogProfilePNG(profile) {
   const height = 630;
   const image = landingOGCanvas() || pngCanvas(width, height, "#FFF9F2");
   const ref = profile.account.handle || profile.account.account_number;
-  const cells = heatmapCellData(profile.days, 365, heatmapScale(profile.days));
+  const cells = heatmapCellData(profile.days, heatmapScale(profile.days));
   const heat = ["#F2E7D9", "#FBD089", "#F99B3C", "#F2611C", "#D6300B"];
 
   image.rect(72, 322, 1058, 278, "#FFF9F2");
@@ -1414,7 +1414,7 @@ function layout(title, body, meta = {}) {
 
 function heatmap(days, options = {}) {
   const scale = options.scale || heatmapScale(days);
-  const data = heatmapCellData(days, options.span || 365, scale);
+  const data = heatmapCellData(days, scale);
   const cells = data.map((cell) => heatmapCell(cell));
   const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
   const learn = options.learn === false ? "" : graphLearnLink();
@@ -1425,14 +1425,15 @@ function heatmap(days, options = {}) {
   </section>`;
 }
 
-function heatmapCellData(days, span = 365, scale = heatmapScale(days)) {
+function heatmapCellData(days, scale = heatmapScale(days)) {
   const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
-  const today = new Date();
+  const today = todayUTCDate();
+  const first = sameDatePreviousYear(today);
+  const gridStart = startOfWeekUTC(first);
   const cells = [];
-  for (let i = span - 1; i >= 0; i--) {
-    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+  for (let d = new Date(gridStart); d <= today; d.setUTCDate(d.getUTCDate() + 1)) {
     const date = d.toISOString().slice(0, 10);
-    const value = byDate.get(date) || 0;
+    const value = d >= first ? byDate.get(date) || 0 : 0;
     cells.push({ date, value, level: level(value, scale) });
   }
   return cells;
@@ -1474,8 +1475,7 @@ function heatmapYears(days) {
 function yearHeatmapCellData(days, year, scale = heatmapScale(days)) {
   const byDate = new Map(days.map((d) => [d.date_utc, d.total_tokens]));
   const cells = [];
-  const today = new Date();
-  const todayUTC = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const todayUTC = todayUTCDate();
   const first = new Date(Date.UTC(year, 0, 1));
   const yearEnd = new Date(Date.UTC(year, 11, 31));
   const last = year === todayUTC.getUTCFullYear() ? todayUTC : yearEnd;
@@ -1540,6 +1540,23 @@ function emptyState(title, body) {
   return `<div class="empty-state"><strong>${esc(title)}</strong><span>${esc(body)}</span></div>`;
 }
 
+function todayUTCDate() {
+  const today = new Date();
+  return new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+}
+
+function sameDatePreviousYear(date) {
+  const year = date.getUTCFullYear() - 1;
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month, Math.min(day, lastDay)));
+}
+
+function startOfWeekUTC(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - date.getUTCDay()));
+}
+
 function formatDate(value) {
   if (!value) return "";
   const d = new Date(`${value}T00:00:00Z`);
@@ -1572,7 +1589,7 @@ function profileStats(days, total) {
   }
 
   const dayMap = new Map(days.map((day) => [day.date_utc, day.total_tokens]));
-  const today = new Date();
+  const today = todayUTCDate();
   let currentStreak = 0;
   for (let i = 0; i < 365; i++) {
     const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
@@ -1582,8 +1599,8 @@ function profileStats(days, total) {
   }
 
   let last365Tokens = 0;
-  for (let i = 0; i < 365; i++) {
-    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+  const first = sameDatePreviousYear(today);
+  for (let d = new Date(first); d <= today; d.setUTCDate(d.getUTCDate() + 1)) {
     last365Tokens += dayMap.get(d.toISOString().slice(0, 10)) || 0;
   }
 
