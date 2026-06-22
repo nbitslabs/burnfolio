@@ -23,6 +23,9 @@ async function route(request, env) {
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path === "/") return html(homePage());
+  if (path === "/signup") return html(authPage("signup"));
+  if (path === "/signin") return html(authPage("signin"));
+  if (path === "/how-we-count") return html(howWeCountPage());
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
   if (path === "/api/account-login" && request.method === "POST") return accountLogin(request, env);
@@ -520,13 +523,11 @@ function homePage() {
         <p class="eyebrow">Burn graph for AI-native builders</p>
         <h1>Show your burn.</h1>
         <p class="lede">The contribution graph for everything you build with AI. Install <code>pyro</code>, sync token counts, and share a graph worth showing off.</p>
-        <form class="signup" method="post" action="/api/signup" data-signup>
-          <label class="sr-only" for="signup-machine">Machine name</label>
-          <input id="signup-machine" name="machine_name" placeholder="machine name" autocomplete="off">
-          <button>Show your burn</button>
-        </form>
+        <div class="hero-actions">
+          <a class="button" href="/signup">Create your graph</a>
+          <a class="button secondary" href="/signin">Sign in</a>
+        </div>
         <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine.</p>
-        <div class="result" data-result hidden></div>
         </div>
         <section class="preview">
           <div class="preview-top">
@@ -540,27 +541,7 @@ function homePage() {
           </div>
         </section>
       </section>
-      <section class="auth-panel">
-        <details>
-          <summary>Already have an account?</summary>
-          <div class="auth-grid">
-            <section>
-              <h2>Email sign-in</h2>
-              <p class="muted">Use a magic link if you attached an email.</p>
-              <form data-login><label class="sr-only" for="login-email">Email</label><input id="login-email" name="email" placeholder="email for magic link" autocomplete="email"><button class="secondary">Send magic link</button></form>
-          <pre class="result" data-login-result hidden></pre>
-            </section>
-            <section>
-              <h2>Anonymous sign-in</h2>
-              <p class="muted">Use the account number and key from signup.</p>
-              <form data-account-login><label class="sr-only" for="account-number">Account number</label><input id="account-number" name="account_number" placeholder="account number"><label class="sr-only" for="account-key">Account key</label><input id="account-key" name="account_key" placeholder="account key"><button class="secondary">Sign in</button></form>
-          <pre class="result" data-account-login-result hidden></pre>
-            </section>
-          </div>
-        </details>
-      </section>
     </main>
-    <script>${signupScript()}</script>
   `, {
     description: "The contribution graph for everything you build with AI. Install pyro, sync token counts, and show your burn.",
     image: "https://burnfolio.ai/og/landing.png",
@@ -569,9 +550,75 @@ function homePage() {
   });
 }
 
+function authPage(mode = "signup") {
+  const isSignup = mode === "signup";
+  const title = isSignup ? "Create your Burnfolio" : "Sign in to Burnfolio";
+  const eyebrow = isSignup ? "Create profile" : "Welcome back";
+  const heading = isSignup ? "Start with an email magic link." : "Open your burn graph.";
+  const body = isSignup
+    ? "We'll create your profile and send a sign-in link. Add machines after you land in the dashboard."
+    : "Use the email attached to your profile. We'll send a fresh magic link.";
+  const submit = isSignup ? "Create profile" : "Send magic link";
+  const switchHref = isSignup ? "/signin" : "/signup";
+  const switchText = isSignup ? "Already have a profile? Sign in" : "New to Burnfolio? Create a profile";
+  return layout(`${title} — Burnfolio`, `
+    <main class="auth-shell">
+      <section class="auth-card primary-auth">
+        <p class="eyebrow">${esc(eyebrow)}</p>
+        <h1>${esc(heading)}</h1>
+        <p class="lede">${esc(body)}</p>
+        <form class="auth-form" data-login data-auth-mode="${isSignup ? "signup" : "signin"}">
+          <label for="auth-email">Email</label>
+          <div class="form-row">
+            <input id="auth-email" name="email" type="email" placeholder="you@example.com" autocomplete="email" required>
+            <button>${esc(submit)}</button>
+          </div>
+        </form>
+        <div class="result auth-result" data-login-result hidden></div>
+        <p class="helper">No password. The link expires in 15 minutes.</p>
+        <p class="auth-switch"><a href="${switchHref}">${esc(switchText)}</a></p>
+      </section>
+      <aside class="auth-card auth-side">
+        <div>
+          <span>Primary flow</span>
+          <strong>Email profile</strong>
+          <p>Best for recovery, username claims, teams, and setting up machines across devices.</p>
+        </div>
+        <details>
+          <summary>Continue without email</summary>
+          <p class="muted">Anonymous profiles use an account number and private account key. Save the key immediately; it is your only recovery path until you attach an email.</p>
+          <form class="auth-form" data-signup>
+            <label for="anon-machine">First machine name</label>
+            <div class="form-row">
+              <input id="anon-machine" name="machine_name" placeholder="macbook-pro" autocomplete="off">
+              <button class="secondary">Create anonymous profile</button>
+            </div>
+          </form>
+          <div class="result" data-result hidden></div>
+        </details>
+        <details>
+          <summary>Sign in with account number</summary>
+          <form class="auth-form" data-account-login>
+            <label for="account-number">Account number</label>
+            <input id="account-number" name="account_number" placeholder="bf_..." autocomplete="off">
+            <label for="account-key">Account key</label>
+            <input id="account-key" name="account_key" placeholder="private account key" autocomplete="off">
+            <button class="secondary">Sign in</button>
+          </form>
+          <div class="result" data-account-login-result hidden></div>
+        </details>
+      </aside>
+    </main>
+    <script>${signupScript()}</script>
+  `, {
+    description: "Create or sign in to Burnfolio with an email magic link, then connect pyro and show your burn.",
+    canonical: `https://burnfolio.ai/${isSignup ? "signup" : "signin"}`,
+  });
+}
+
 async function appPage(request, env) {
   const user = await requireUser(request, env);
-  if (!user) return homePage();
+  if (!user) return authPage("signin");
   const account = await accountView(env, user.id);
   const userInfo = await env.DB.prepare("SELECT email, email_verified_at FROM users WHERE id = ?").bind(user.id).first();
   const machines = await machineRows(env, user.id);
@@ -1049,6 +1096,50 @@ function authResultPage(message, ok) {
   return layout(ok ? "Signed in" : "Sign in failed", `<main class="profile"><p class="eyebrow">${ok ? "Success" : "Link error"}</p><h1>${esc(message)}</h1><a href="/app">Open dashboard</a></main>`);
 }
 
+function howWeCountPage() {
+  return layout("How Burnfolio counts token burn", `
+    <main class="learn-page">
+      <header class="learn-hero">
+        <p class="eyebrow">Graph settings</p>
+        <h1>How we count token burn</h1>
+        <p class="lede">Burnfolio turns local AI session records into daily token totals. The graph is about activity counts, not content.</p>
+      </header>
+      <section class="learn-grid">
+        <article class="learn-card">
+          <h2>What counts</h2>
+          <p><code>pyro</code> reads supported local session records for Claude, Codex, OpenCode, and Pi, normalizes token usage, and syncs daily totals to your profile.</p>
+          <p>Each square represents the total tokens Burnfolio has received for that day. Higher totals render hotter cells.</p>
+        </article>
+        <article class="learn-card">
+          <h2>What does not count</h2>
+          <p>Prompts, generated code, transcripts, file contents, and message bodies are not sent to Burnfolio.</p>
+          <p>Local runs that happen before <code>pyro</code> can find a supported session record may not appear until the source tool writes its usage data.</p>
+        </article>
+        <article class="learn-card">
+          <h2>Machines and organizations</h2>
+          <p>Machine tokens tag usage to one machine and one profile or organization. Personal profiles show your machines. Organization graphs sum member usage assigned to the org.</p>
+        </article>
+        <article class="learn-card">
+          <h2>Duplicate protection</h2>
+          <p>Syncs are idempotent by day, tool, model, machine, and profile. Re-running <code>pyro</code> updates totals instead of adding the same local records again.</p>
+        </article>
+      </section>
+      <section class="learn-card learn-wide">
+        <h2>Missing burn?</h2>
+        <div class="learn-steps">
+          <p><strong>Check the machine token.</strong> Copy the install command from the machine row in your dashboard so the profile and machine are both set.</p>
+          <p><strong>Run a manual sync.</strong> Run <code>pyro sync</code> after a session to confirm the local collector can find records.</p>
+          <p><strong>Check your source tool.</strong> If a tool has not written usage records yet, Burnfolio has nothing to count.</p>
+          <p><strong>Look at the right profile.</strong> Organization machines contribute to the org graph; personal machines contribute to your profile.</p>
+        </div>
+      </section>
+    </main>
+  `, {
+    description: "Learn how Burnfolio counts token burn, updates daily graph cells, and handles machines and organizations.",
+    canonical: "https://burnfolio.ai/how-we-count",
+  });
+}
+
 function layout(title, body, meta = {}) {
   const description = meta.description || "Burnfolio turns your AI token burn into a contribution graph worth sharing.";
   const canonical = meta.canonical || "https://burnfolio.ai";
@@ -1085,9 +1176,11 @@ function heatmap(days, options = {}) {
   const data = heatmapCellData(days, options.span || 365, scale);
   const cells = data.map((cell) => heatmapCell(cell));
   const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
+  const learn = options.learn === false ? "" : graphLearnLink();
   return `<section class="${classes}">
     ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
     <div class="heatmap-scroll">${heatmapFrame(data, cells.join(""), "Token burn by day")}</div>
+    ${learn}
   </section>`;
 }
 
@@ -1107,15 +1200,22 @@ function heatmapCellData(days, span = 365, scale = heatmapScale(days)) {
 function heatmapTimeline(days, options = {}) {
   const years = heatmapYears(days);
   const scale = options.scale || heatmapScale(days);
-  return `<section class="graph timeline">
+  return `<section class="timeline-layout">
+    <div class="graph timeline">
     <div class="graph-head"><div><h2>${esc(options.title || "Token burn timeline")}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>
-    <div class="timeline-years">${years.map((year) => {
+    <div class="timeline-years">${years.map((year, index) => {
       const data = yearHeatmapCellData(days, year, scale);
       const cells = data.map((cell) => heatmapCell(cell)).join("");
       const total = days.filter((day) => day.date_utc.startsWith(String(year))).reduce((sum, day) => sum + day.total_tokens, 0);
-      return `<section class="year-row"><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll">${heatmapFrame(data, cells, `Token burn by day in ${year}`, "year-heatmap")}</div></section>`;
+      return `<section class="year-panel" data-year-panel="${year}"${index ? " hidden" : ""}><div class="year-label"><strong>${year}</strong><span>${formatInt(total)} tokens</span></div><div class="heatmap-scroll">${heatmapFrame(data, cells, `Token burn by day in ${year}`, "year-heatmap")}</div>${graphLearnLink()}</section>`;
     }).join("")}</div>
+    </div>
+    <nav class="year-selector" aria-label="Contribution years">${years.map((year, index) => `<button type="button" class="year-button${index ? "" : " active"}" data-year-button="${year}" aria-pressed="${index ? "false" : "true"}">${year}</button>`).join("")}</nav>
   </section>`;
+}
+
+function graphLearnLink() {
+  return `<div class="graph-meta"><a href="/how-we-count">Learn how we count token burn</a></div>`;
 }
 
 function heatmapYears(days) {
@@ -1367,7 +1467,8 @@ function signupScript() {
       const res = await fetch("/api/magic-links", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
       result.hidden = false;
-      result.textContent = res.ok ? "Magic link sent. Check your email." : messageFor(data);
+      const mode = form.dataset.authMode || "signin";
+      result.textContent = res.ok ? (mode === "signup" ? "Magic link sent. Check your email to finish creating your profile." : "Magic link sent. Check your email to sign in.") : messageFor(data);
     });
     document.querySelector("[data-account-login]").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1542,6 +1643,19 @@ function globalScript() {
     document.addEventListener("focusin", showTip);
     document.addEventListener("mouseout", (event) => { if (event.target.closest("[data-tip]")) hideTip(); });
     document.addEventListener("focusout", (event) => { if (event.target.closest("[data-tip]")) hideTip(); });
+    document.querySelectorAll("[data-year-button]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const year = button.dataset.yearButton;
+        document.querySelectorAll("[data-year-panel]").forEach((panel) => {
+          panel.hidden = panel.dataset.yearPanel !== year;
+        });
+        document.querySelectorAll("[data-year-button]").forEach((item) => {
+          const active = item === button;
+          item.classList.toggle("active", active);
+          item.setAttribute("aria-pressed", active ? "true" : "false");
+        });
+      });
+    });
   `;
 }
 
