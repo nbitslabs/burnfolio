@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { inflateSync } from "node:zlib";
 
 const sourcePath = "worker/index.js";
 const cssPath = "worker/styles.generated.css";
@@ -24,6 +25,15 @@ const assets = Object.fromEntries(await Promise.all(Object.entries(assetFiles).m
     body: asset.encoding === "base64" ? buffer.toString("base64") : buffer.toString("utf8"),
   }];
 })));
+
+const landing = decodePNG(await readFile("worker/assets/og-landing.png"));
+assets["og-landing-rgba"] = {
+  type: "image/raw-rgba",
+  encoding: "base64",
+  width: landing.width,
+  height: landing.height,
+  body: Buffer.from(landing.pixels).toString("base64"),
+};
 
 const escapedCSS = css
   .replace(/\\/g, "\\\\")
@@ -52,3 +62,64 @@ built = withAssets;
 
 await mkdir("dist/worker", { recursive: true });
 await writeFile(outPath, built);
+
+function decodePNG(buffer) {
+  const signature = "89504e470d0a1a0a";
+  if (buffer.subarray(0, 8).toString("hex") !== signature) throw new Error("Invalid PNG signature");
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  const idat = [];
+  while (offset < buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.subarray(offset + 4, offset + 8).toString("ascii");
+    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    offset += 12 + length;
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      const bitDepth = data[8];
+      const colorType = data[9];
+      const interlace = data[12];
+      if (bitDepth !== 8 || colorType !== 6 || interlace !== 0) throw new Error("Only non-interlaced 8-bit RGBA PNGs are supported");
+    } else if (type === "IDAT") {
+      idat.push(data);
+    } else if (type === "IEND") {
+      break;
+    }
+  }
+  const compressed = Buffer.concat(idat);
+  const raw = inflateSync(compressed);
+  const stride = width * 4;
+  const pixels = new Uint8Array(width * height * 4);
+  let input = 0;
+  for (let y = 0; y < height; y++) {
+    const filter = raw[input++];
+    const row = raw.subarray(input, input + stride);
+    input += stride;
+    const out = y * stride;
+    for (let x = 0; x < stride; x++) {
+      const left = x >= 4 ? pixels[out + x - 4] : 0;
+      const up = y > 0 ? pixels[out + x - stride] : 0;
+      const upLeft = y > 0 && x >= 4 ? pixels[out + x - stride - 4] : 0;
+      let value = row[x];
+      if (filter === 1) value = (value + left) & 255;
+      else if (filter === 2) value = (value + up) & 255;
+      else if (filter === 3) value = (value + Math.floor((left + up) / 2)) & 255;
+      else if (filter === 4) value = (value + paeth(left, up, upLeft)) & 255;
+      else if (filter !== 0) throw new Error(`Unsupported PNG filter ${filter}`);
+      pixels[out + x] = value;
+    }
+  }
+  return { width, height, pixels };
+}
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}

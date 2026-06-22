@@ -1,9 +1,13 @@
 :root {
   color-scheme: light;
   --burnfolio-flame: #F2611C;
+  --burnfolio-flame-deep: #C2400A;
+  --burnfolio-flame-deep-h: #A83505;
   --burnfolio-ember: #A83505;
   --burnfolio-blaze: #D6300B;
   --burnfolio-glow: #FFC23D;
+  --burnfolio-spark: #FF4D8D;
+  --burnfolio-spark-deep: #E0246B;
   --burnfolio-ink: #211405;
   --burnfolio-ash: #6F5F4D;
   --burnfolio-paper: #FFF9F2;
@@ -21,7 +25,15 @@
   --burnfolio-heat-2: #F99B3C;
   --burnfolio-heat-3: #F2611C;
   --burnfolio-heat-4: #D6300B;
+  --burnfolio-success: #0F7A40;
+  --burnfolio-warning: #F5A623;
+  --burnfolio-error: #C0271B;
+  --burnfolio-info: #1F5FBF;
   --burnfolio-r-cell: 2px;
+  --burnfolio-r-s: 8px;
+  --burnfolio-r-m: 12px;
+  --burnfolio-r-l: 18px;
+  --burnfolio-r-pill: 999px;
   --bg: var(--burnfolio-paper);
   --ink: var(--burnfolio-ink);
   --muted: var(--burnfolio-ash);
@@ -32,7 +44,9 @@
   --green: var(--burnfolio-ember);
   --cyan: var(--burnfolio-glow);
   --gold: var(--burnfolio-glow);
-  --shadow: 0 8px 28px rgba(33, 20, 5, .10);
+  --shadow: 0 1px 2px rgba(33, 20, 5, .06);
+  --shadow-raised: 0 8px 28px rgba(33, 20, 5, .10);
+  --glow-flame: 0 6px 24px rgba(242, 97, 28, .28);
   font-family: "Plus Jakarta Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--ink);
@@ -98,9 +112,9 @@ a { color: var(--burnfolio-ember); text-decoration: none; }
 button,
 .button {
   border: 0;
-  border-radius: 999px;
-  background: var(--burnfolio-flame);
-  color: var(--burnfolio-ink);
+  border-radius: var(--burnfolio-r-pill);
+  background: var(--burnfolio-flame-deep);
+  color: #fff;
   padding: 11px 14px;
   font-family: "Plus Jakarta Sans", system-ui, sans-serif;
   font-weight: 700;
@@ -109,18 +123,27 @@ button,
   align-items: center;
   justify-content: center;
   min-height: 42px;
+  box-shadow: var(--glow-flame);
+}
+button:hover,
+.button:hover {
+  background: var(--burnfolio-flame-deep-h);
 }
 .secondary {
   background: var(--burnfolio-linen);
   color: var(--burnfolio-ink);
   border: 1px solid var(--burnfolio-line);
+  box-shadow: none;
+}
+.secondary:hover {
+  background: var(--burnfolio-wash);
 }
 input,
 select {
   border: 1px solid var(--burnfolio-line);
   background: var(--burnfolio-linen);
   color: var(--burnfolio-ink);
-  border-radius: 8px;
+  border-radius: var(--burnfolio-r-s);
   padding: 12px 13px;
   min-width: 0;
 }
@@ -136,7 +159,7 @@ pre {
   font-family: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   background: var(--burnfolio-wash);
   border: 1px solid var(--burnfolio-line);
-  border-radius: 8px;
+  border-radius: var(--burnfolio-r-s);
   padding: 10px;
   overflow: auto;
 }

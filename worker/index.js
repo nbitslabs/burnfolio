@@ -20,6 +20,7 @@ async function route(request, env) {
   if (path === "/apple-touch-icon.png") return assetResponse("pyro-512.png");
   if (path.match(/^\/assets\/[^/]+$/)) return assetResponse(path.split("/")[2]);
   if (path === "/og/landing.png") return assetResponse("og-landing.png");
+  if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path === "/") return html(homePage());
   if (path === "/app") return html(await appPage(request, env));
@@ -333,6 +334,12 @@ async function ogProfilePage(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return svgResponse(ogLandingFallbackSVG("Profile not found"), 404);
   return svgResponse(ogProfileSVG(profile));
+}
+
+async function ogProfilePNGPage(env, ref) {
+  const profile = await buildProfile(env, ref);
+  const body = profile ? ogProfilePNG(profile) : ogFallbackPNG("PROFILE NOT FOUND");
+  return pngResponse(body, profile ? 200 : 404, profile ? 300 : 60);
 }
 
 async function embedPage(env, ref) {
@@ -687,8 +694,8 @@ function profileHtml(profile) {
     </main>
   `, {
     description,
-    image: `https://burnfolio.ai/og/${encodeURIComponent(name)}.svg`,
-    imageType: "image/svg+xml",
+    image: `https://burnfolio.ai/og/${encodeURIComponent(name)}.png`,
+    imageType: "image/png",
     canonical: profileURL,
     siteName: "Burnfolio",
   });
@@ -771,6 +778,267 @@ function ogProfileSVG(profile) {
 
 function ogLandingFallbackSVG(message) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><rect width="1200" height="630" fill="#FFF9F2"/><text x="80" y="320" fill="#211405" font-family="Arial, sans-serif" font-size="56" font-weight="700">${esc(message)}</text></svg>`;
+}
+
+function ogProfilePNG(profile) {
+  const width = 1200;
+  const height = 630;
+  const image = landingOGCanvas() || pngCanvas(width, height, "#FFF9F2");
+  const ref = profile.account.handle || profile.account.account_number;
+  const cells = heatmapCellData(profile.days, 365, heatmapScale(profile.days));
+  const heat = ["#F2E7D9", "#FBD089", "#F99B3C", "#F2611C", "#D6300B"];
+
+  image.rect(72, 322, 1058, 278, "#FFF9F2");
+
+  const startX = 78;
+  const startY = 330;
+  const cell = 16;
+  const gap = 4;
+  for (let i = 0; i < cells.length; i++) {
+    const x = startX + Math.floor(i / 7) * (cell + gap);
+    const y = startY + (i % 7) * (cell + gap);
+    image.roundRect(x, y, cell, cell, 2, heat[cells[i].level]);
+  }
+
+  const best = profile.stats.best_day ? `best ${formatCompact(profile.stats.best_day_tokens)}` : "best pending";
+  image.text(ref, 76, 568, 3, "#A83505", 230);
+  image.text(`${formatCompact(profile.total_tokens)} tokens burned`, 312, 572, 2, "#A83505", 250);
+  image.text(`${formatInt(profile.stats.active_days)} active days`, 578, 572, 2, "#A83505", 175);
+  image.text(best, 770, 572, 2, "#A83505", 112);
+  image.text(`burnfolio.ai/${ref}`, 890, 572, 2, "#211405", 300);
+
+  return image.png();
+}
+
+function ogFallbackPNG(message) {
+  const image = landingOGCanvas() || pngCanvas(1200, 630, "#FFF9F2");
+  image.rect(72, 322, 1058, 278, "#FFF9F2", 0.96);
+  image.text(message, 86, 286, 7, "#211405", 840);
+  return image.png();
+}
+
+function landingOGCanvas() {
+  const asset = assetData()["og-landing-rgba"];
+  if (!asset) return null;
+  const binary = atob(asset.body);
+  const pixels = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) pixels[i] = binary.charCodeAt(i);
+  return pngCanvas(asset.width, asset.height, pixels);
+}
+
+function pngCanvas(width, height, background) {
+  const pixels = new Uint8Array(width * height * 4);
+  if (background instanceof Uint8Array) {
+    pixels.set(background.subarray(0, pixels.length));
+  } else {
+    const bg = rgba(background);
+    for (let i = 0; i < pixels.length; i += 4) {
+      pixels[i] = bg[0];
+      pixels[i + 1] = bg[1];
+      pixels[i + 2] = bg[2];
+      pixels[i + 3] = 255;
+    }
+  }
+  const blendPixel = (x, y, color, alpha = 1) => {
+    if (x < 0 || y < 0 || x >= width || y >= height || alpha <= 0) return;
+    const i = (y * width + x) * 4;
+    const inv = 1 - alpha;
+    pixels[i] = Math.round(color[0] * alpha + pixels[i] * inv);
+    pixels[i + 1] = Math.round(color[1] * alpha + pixels[i + 1] * inv);
+    pixels[i + 2] = Math.round(color[2] * alpha + pixels[i + 2] * inv);
+    pixels[i + 3] = 255;
+  };
+  return {
+    rect(x, y, w, h, color, alpha = 1) {
+      const c = rgba(color);
+      for (let yy = Math.max(0, y); yy < Math.min(height, y + h); yy++) {
+        for (let xx = Math.max(0, x); xx < Math.min(width, x + w); xx++) blendPixel(xx, yy, c, alpha);
+      }
+    },
+    roundRect(x, y, w, h, r, color, alpha = 1, stroke = false) {
+      const c = rgba(color);
+      for (let yy = Math.max(0, y); yy < Math.min(height, y + h); yy++) {
+        for (let xx = Math.max(0, x); xx < Math.min(width, x + w); xx++) {
+          const dx = xx < x + r ? x + r - xx : xx >= x + w - r ? xx - (x + w - r - 1) : 0;
+          const dy = yy < y + r ? y + r - yy : yy >= y + h - r ? yy - (y + h - r - 1) : 0;
+          if (dx * dx + dy * dy > r * r) continue;
+          if (stroke && xx > x && xx < x + w - 1 && yy > y && yy < y + h - 1) continue;
+          blendPixel(xx, yy, c, alpha);
+        }
+      }
+    },
+    disc(cx, cy, radius, color, alpha = 1) {
+      const c = rgba(color);
+      for (let yy = Math.max(0, cy - radius); yy < Math.min(height, cy + radius); yy++) {
+        for (let xx = Math.max(0, cx - radius); xx < Math.min(width, cx + radius); xx++) {
+          const d = Math.hypot(xx - cx, yy - cy);
+          if (d <= radius) blendPixel(xx, yy, c, alpha * Math.max(0, 1 - d / radius));
+        }
+      }
+    },
+    text(text, x, y, scale, color, maxWidth = Infinity) {
+      const raw = String(text || "").toUpperCase();
+      let value = raw;
+      while (measureBitmap(value, scale) > maxWidth && value.length > 4) value = `${value.slice(0, -4)}...`;
+      drawBitmapText({ set: blendPixel }, value, x, y, scale, rgba(color));
+    },
+    png() {
+      return encodePNG(width, height, pixels);
+    },
+  };
+}
+
+function rgba(hex) {
+  const value = String(hex || "").replace("#", "");
+  return [
+    parseInt(value.slice(0, 2), 16) || 0,
+    parseInt(value.slice(2, 4), 16) || 0,
+    parseInt(value.slice(4, 6), 16) || 0,
+  ];
+}
+
+const BITMAP_FONT = {
+  " ": ["00000","00000","00000","00000","00000","00000","00000"],
+  "A": ["01110","10001","10001","11111","10001","10001","10001"],
+  "B": ["11110","10001","10001","11110","10001","10001","11110"],
+  "C": ["01111","10000","10000","10000","10000","10000","01111"],
+  "D": ["11110","10001","10001","10001","10001","10001","11110"],
+  "E": ["11111","10000","10000","11110","10000","10000","11111"],
+  "F": ["11111","10000","10000","11110","10000","10000","10000"],
+  "G": ["01111","10000","10000","10111","10001","10001","01111"],
+  "H": ["10001","10001","10001","11111","10001","10001","10001"],
+  "I": ["11111","00100","00100","00100","00100","00100","11111"],
+  "J": ["00111","00010","00010","00010","10010","10010","01100"],
+  "K": ["10001","10010","10100","11000","10100","10010","10001"],
+  "L": ["10000","10000","10000","10000","10000","10000","11111"],
+  "M": ["10001","11011","10101","10101","10001","10001","10001"],
+  "N": ["10001","11001","10101","10011","10001","10001","10001"],
+  "O": ["01110","10001","10001","10001","10001","10001","01110"],
+  "P": ["11110","10001","10001","11110","10000","10000","10000"],
+  "Q": ["01110","10001","10001","10001","10101","10010","01101"],
+  "R": ["11110","10001","10001","11110","10100","10010","10001"],
+  "S": ["01111","10000","10000","01110","00001","00001","11110"],
+  "T": ["11111","00100","00100","00100","00100","00100","00100"],
+  "U": ["10001","10001","10001","10001","10001","10001","01110"],
+  "V": ["10001","10001","10001","10001","10001","01010","00100"],
+  "W": ["10001","10001","10001","10101","10101","10101","01010"],
+  "X": ["10001","10001","01010","00100","01010","10001","10001"],
+  "Y": ["10001","10001","01010","00100","00100","00100","00100"],
+  "Z": ["11111","00001","00010","00100","01000","10000","11111"],
+  "0": ["01110","10001","10011","10101","11001","10001","01110"],
+  "1": ["00100","01100","00100","00100","00100","00100","01110"],
+  "2": ["01110","10001","00001","00010","00100","01000","11111"],
+  "3": ["11110","00001","00001","01110","00001","00001","11110"],
+  "4": ["00010","00110","01010","10010","11111","00010","00010"],
+  "5": ["11111","10000","10000","11110","00001","00001","11110"],
+  "6": ["01110","10000","10000","11110","10001","10001","01110"],
+  "7": ["11111","00001","00010","00100","01000","01000","01000"],
+  "8": ["01110","10001","10001","01110","10001","10001","01110"],
+  "9": ["01110","10001","10001","01111","00001","00001","01110"],
+  ".": ["00000","00000","00000","00000","00000","01100","01100"],
+  ",": ["00000","00000","00000","00000","01100","01100","01000"],
+  ":": ["00000","01100","01100","00000","01100","01100","00000"],
+  "-": ["00000","00000","00000","11111","00000","00000","00000"],
+  "_": ["00000","00000","00000","00000","00000","00000","11111"],
+  "/": ["00001","00010","00010","00100","01000","01000","10000"],
+};
+
+function measureBitmap(text, scale) {
+  return String(text || "").length ? String(text).length * 6 * scale - scale : 0;
+}
+
+function drawBitmapText(ctx, text, x, y, scale, color) {
+  let cursor = x;
+  for (const ch of String(text || "")) {
+    const glyph = BITMAP_FONT[ch] || BITMAP_FONT[" "];
+    for (let row = 0; row < glyph.length; row++) {
+      for (let col = 0; col < glyph[row].length; col++) {
+        if (glyph[row][col] !== "1") continue;
+        for (let yy = 0; yy < scale; yy++) {
+          for (let xx = 0; xx < scale; xx++) ctx.set(cursor + col * scale + xx, y + row * scale + yy, color, 1);
+        }
+      }
+    }
+    cursor += 6 * scale;
+  }
+}
+
+function encodePNG(width, height, rgbaPixels) {
+  const raw = new Uint8Array((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const rawOffset = y * (width * 4 + 1);
+    const pixelOffset = y * width * 4;
+    raw[rawOffset] = 0;
+    raw.set(rgbaPixels.subarray(pixelOffset, pixelOffset + width * 4), rawOffset + 1);
+  }
+  return concatBytes(
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", concatBytes(u32(width), u32(height), new Uint8Array([8, 6, 0, 0, 0]))),
+    pngChunk("IDAT", zlibStore(raw)),
+    pngChunk("IEND", new Uint8Array())
+  );
+}
+
+function zlibStore(data) {
+  const parts = [new Uint8Array([0x78, 0x01])];
+  for (let offset = 0; offset < data.length; offset += 65535) {
+    const len = Math.min(65535, data.length - offset);
+    const final = offset + len >= data.length ? 1 : 0;
+    parts.push(new Uint8Array([final, len & 255, len >> 8, (~len) & 255, ((~len) >> 8) & 255]));
+    parts.push(data.subarray(offset, offset + len));
+  }
+  parts.push(u32(adler32(data)));
+  return concatBytes(...parts);
+}
+
+function pngChunk(type, data) {
+  const name = new TextEncoder().encode(type);
+  return concatBytes(u32(data.length), name, data, u32(crc32(concatBytes(name, data))));
+}
+
+function u32(value) {
+  const out = new Uint8Array(4);
+  out[0] = (value >>> 24) & 255;
+  out[1] = (value >>> 16) & 255;
+  out[2] = (value >>> 8) & 255;
+  out[3] = value & 255;
+  return out;
+}
+
+function concatBytes(...parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+function adler32(data) {
+  let a = 1;
+  let b = 0;
+  for (const byte of data) {
+    a = (a + byte) % 65521;
+    b = (b + a) % 65521;
+  }
+  return ((b << 16) | a) >>> 0;
+}
+
+let crcTable = null;
+function crc32(data) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[n] = c >>> 0;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for (const byte of data) c = crcTable[(c ^ byte) & 255] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
 function notFoundPage() {
@@ -1302,6 +1570,16 @@ function svgResponse(body, status = 200) {
   });
 }
 
+function pngResponse(body, status = 200, maxAge = 300) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "image/png",
+      "Cache-Control": `public, max-age=${maxAge}`,
+    },
+  });
+}
+
 function assetResponse(name) {
   const asset = assetData()[name];
   if (!asset) return new Response("Not found", { status: 404 });
@@ -1407,7 +1685,7 @@ function magicEmailHtml(link) {
             </tr>
             <tr>
               <td style="padding:18px 28px">
-                <a href="${safeLink}" style="display:inline-block;background:#F2611C;color:#211405;text-decoration:none;font-weight:800;border-radius:999px;padding:13px 18px">Sign in to Burnfolio</a>
+                <a href="${safeLink}" style="display:inline-block;background:#C2400A;color:#FFFFFF;text-decoration:none;font-weight:800;border-radius:999px;padding:13px 18px">Sign in to Burnfolio</a>
               </td>
             </tr>
             <tr>
