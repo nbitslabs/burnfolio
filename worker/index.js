@@ -531,9 +531,9 @@ function homePage() {
         </div>
         <section class="preview">
           <div class="preview-top">
-            <div><span>Public burn graph</span><strong>8.4B sample tokens</strong></div>
+            <div><span>Public burn graph</span><strong>8.4B tokens burned</strong></div>
           </div>
-          ${heatmap(sampleDays(), { span: 365, title: "Last 365 days", subtitle: "Sample burn graph" })}
+          ${heatmap(sampleDays(), { span: 365, title: "Last 365 days", subtitle: "Burn graph preview" })}
           <div class="steps">
             <span>Create a profile</span>
             <span>Run <code>pyro</code></span>
