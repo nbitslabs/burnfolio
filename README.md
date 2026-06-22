@@ -40,8 +40,8 @@ curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh
 ```
 
 The dashboard keeps a copy-ready install command on each machine row. For older
-machines where Burnfolio only has the token hash, the copied command includes
-the profile and prompts for the existing machine token.
+machines where Burnfolio only has the token hash, the row action creates a
+replacement token and copies a complete install command.
 
 The installer asks whether to set up automatic sync with cron: `none`, `hourly`,
 or `daily`. For non-interactive setup, pass the schedule explicitly:

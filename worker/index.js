@@ -26,6 +26,7 @@ async function route(request, env) {
   if (path === "/api/me") return me(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/machines" && request.method === "POST") return createMachineRoute(request, env);
+  if (path.match(/^\/api\/machines\/[^/]+\/token$/) && request.method === "POST") return rotateMachineTokenRoute(request, env, decodeURIComponent(path.split("/")[3]));
   if (path === "/api/orgs" && request.method === "POST") return createOrgRoute(request, env);
   if (path.match(/^\/api\/orgs\/[^/]+\/members$/) && request.method === "POST") return addOrgMemberRoute(request, env, path.split("/")[3]);
   if (path === "/api/ingest" && request.method === "POST") return ingest(request, env);
@@ -212,6 +213,37 @@ async function createMachineRoute(request, env) {
     profileRef: org ? accountRef(org) : accountRef(await accountView(env, user.id)),
   });
   return json({ machine }, 201);
+}
+
+async function rotateMachineTokenRoute(request, env, machineNumber) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const machine = await env.DB.prepare(`
+    SELECT
+      m.id,
+      m.machine_number,
+      m.name,
+      m.org_id,
+      ua.account_number AS user_account_number,
+      uh.handle AS user_handle,
+      oa.account_number AS org_account_number,
+      oh.handle AS org_handle
+    FROM machines m
+    JOIN accounts ua ON ua.id = m.user_id
+    LEFT JOIN handles uh ON uh.account_id = ua.id
+    LEFT JOIN accounts oa ON oa.id = m.org_id
+    LEFT JOIN handles oh ON oh.account_id = oa.id
+    WHERE m.machine_number = ? AND m.user_id = ?
+  `).bind(machineNumber, user.id).first();
+  if (!machine) return json({ error: "machine_not_found" }, 404);
+
+  const token = randomToken("bfm");
+  await env.DB.prepare("UPDATE machines SET token_hash = ?, token = ? WHERE id = ?")
+    .bind(await sha256(token), token, machine.id).run();
+  const profile = machine.org_id
+    ? machine.org_handle || machine.org_account_number
+    : machine.user_handle || machine.user_account_number;
+  return json({ machine: { machine_number: machine.machine_number, name: machine.name, token, profile } });
 }
 
 async function createOrgRoute(request, env) {
@@ -574,9 +606,9 @@ async function appPage(request, env) {
 function machineRow(machine, fallbackProfileRef) {
   const profileRef = machine.org_handle || machine.org_account_number || fallbackProfileRef;
   const scope = machine.org_id ? `org ${machine.org_display_name || profileRef}` : "personal profile";
-  const command = machine.token ? installCommand(profileRef, machine.token) : installPromptCommand(profileRef);
-  const note = machine.token ? "" : `<span class="row-note">Prompts for your existing token.</span>`;
-  const action = `<button type="button" class="secondary copy" data-copy="${esc(command)}">Copy install</button>${note}`;
+  const action = machine.token
+    ? `<button type="button" class="secondary copy" data-copy="${esc(installCommand(profileRef, machine.token))}">Copy install</button>`
+    : `<button type="button" class="secondary copy" data-refresh-machine="${esc(machine.machine_number)}">Generate token + copy</button><span class="row-note">Creates a replacement token for this machine.</span>`;
   return `<div class="row machine-row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
 }
 
@@ -588,10 +620,6 @@ function orgRow(org) {
 
 function installCommand(profile, machine) {
   return `curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile ${profile} --machine ${machine}`;
-}
-
-function installPromptCommand(profile) {
-  return `curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile ${profile}`;
 }
 
 function uninstallCommand() {
@@ -1028,6 +1056,7 @@ function dashboardScript(profileRef) {
         email_send_failed: "The email could not be sent. Try again shortly.",
         org_handle_unavailable: "That organization username is already taken.",
         org_not_found: "Organization not found.",
+        machine_not_found: "That machine was not found.",
         forbidden: "Only org admins can add members.",
         user_not_found: "No user was found for that account or username."
       };
@@ -1039,7 +1068,47 @@ function dashboardScript(profileRef) {
       const data = await res.json();
       return { ok: res.ok, data };
     }
+    async function copyText(value, button) {
+      try {
+        await navigator.clipboard.writeText(value);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Select";
+      }
+      setTimeout(() => button.textContent = button.dataset.label || "Copy", 1200);
+    }
     document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); ok && data.machine ? machineResult(out, data.machine) : (out.hidden = false, out.textContent = messageFor(data)); });
+    document.querySelectorAll("[data-refresh-machine]").forEach(button => {
+      button.dataset.label = button.textContent;
+      button.addEventListener("click", async () => {
+        if (!button.dataset.refreshMachine) {
+          await copyText(button.dataset.copy || "", button);
+          return;
+        }
+        const original = button.dataset.label || button.textContent;
+        button.disabled = true;
+        button.textContent = "Generating...";
+        try {
+          const res = await fetch("/api/machines/" + encodeURIComponent(button.dataset.refreshMachine) + "/token", { method:"POST" });
+          const data = await res.json();
+          if (!res.ok || !data.machine) throw data;
+          const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + data.machine.profile + " --machine " + data.machine.token;
+          button.dataset.copy = command;
+          button.removeAttribute("data-refresh-machine");
+          button.dataset.label = "Copy install";
+          button.textContent = "Copy install";
+          const note = button.parentElement && button.parentElement.querySelector(".row-note");
+          if (note) note.remove();
+          await copyText(command, button);
+        } catch (error) {
+          button.textContent = "Try again";
+          alert(messageFor(error));
+          setTimeout(() => button.textContent = original, 1400);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
     document.querySelector("[data-handle]")?.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/handles"); ok ? location.reload() : alert(messageFor(data)); });
     document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = ok ? "Verification link sent. Check your email." : messageFor(data); });
     document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); ok && data.org ? location.reload() : (out.hidden = false, out.textContent = messageFor(data)); });
