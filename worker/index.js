@@ -540,9 +540,13 @@ async function ingest(request, env) {
   const days = Array.isArray(body.days) ? body.days : [];
   if (days.length > MAX_SYNC_DAYS) return json({ error: "too_many_days" }, 400);
   const statements = [];
+  let skippedDays = 0;
   for (const day of days) {
     const date = String(day.date_utc || "");
-    if (!validIngestDate(date)) return json({ error: "invalid_date" }, 400);
+    if (!validIngestDate(date)) {
+      skippedDays++;
+      continue;
+    }
     const usage = day.usage || {};
     const input = boundedInt(usage.input, MAX_TOKEN_FIELD);
     const cacheRead = boundedInt(usage.cache_read, MAX_TOKEN_FIELD);
@@ -553,7 +557,8 @@ async function ingest(request, env) {
     const total = explicitTotal ? boundedInt(explicitTotal, MAX_TOKEN_FIELD) : boundedInt(input + cacheRead + cacheWrite + output, MAX_TOKEN_FIELD);
     const records = boundedInt(day.records, MAX_RECORDS_PER_DAY);
     if ([input, cacheRead, cacheWrite, output, reasoning, total, records].some((value) => value === null)) {
-      return json({ error: "invalid_usage" }, 400);
+      skippedDays++;
+      continue;
     }
     statements.push(env.DB.prepare(`
       INSERT INTO daily_machine_usage
@@ -572,7 +577,7 @@ async function ingest(request, env) {
   }
   if (statements.length) await env.DB.batch(statements);
   await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_pyro_version = ? WHERE id = ?").bind(pyroVersion || null, machine.id).run();
-  return json({ ok: true, upserted_days: statements.length });
+  return json({ ok: true, upserted_days: statements.length, skipped_days: skippedDays });
 }
 
 async function profileStatsRoute(env, ref) {

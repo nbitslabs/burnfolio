@@ -150,10 +150,14 @@ func main() {
 		cfg.Installed = true
 		cfg.UninstalledAt = ""
 		cfg.LastSyncAt = time.Now().UTC().Format(time.RFC3339)
-		cfg.LastSyncStatus = fmt.Sprintf("ok: %d days", result.UpsertedDays)
+		cfg.LastSyncStatus = syncStatus(result)
 		cfg.LastPyroVersion = version
 		_ = saveConfig(defaultHome, cfg)
-		fmt.Printf("\nSynced %d days to %s for %s.\n", result.UpsertedDays, strings.TrimRight(server, "/"), profile)
+		if result.SkippedDays > 0 {
+			fmt.Printf("\nSynced %d days to %s for %s. Skipped %d invalid days.\n", result.UpsertedDays, strings.TrimRight(server, "/"), profile, result.SkippedDays)
+		} else {
+			fmt.Printf("\nSynced %d days to %s for %s.\n", result.UpsertedDays, strings.TrimRight(server, "/"), profile)
+		}
 	}
 
 	if len(report.Warnings) > 0 {
@@ -174,7 +178,15 @@ type syncPayload struct {
 type syncResult struct {
 	OK           bool   `json:"ok"`
 	UpsertedDays int    `json:"upserted_days"`
+	SkippedDays  int    `json:"skipped_days"`
 	Error        string `json:"error"`
+}
+
+func syncStatus(result syncResult) string {
+	if result.SkippedDays > 0 {
+		return fmt.Sprintf("ok: %d days, %d skipped", result.UpsertedDays, result.SkippedDays)
+	}
+	return fmt.Sprintf("ok: %d days", result.UpsertedDays)
 }
 
 func syncReport(ctx context.Context, server string, profile string, machineToken string, report usage.Report) (syncResult, error) {

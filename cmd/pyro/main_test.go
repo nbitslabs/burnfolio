@@ -25,7 +25,7 @@ func TestSyncReportPostsDailyTotals(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
 			t.Fatal(err)
 		}
-		_ = json.NewEncoder(w).Encode(syncResult{OK: true, UpsertedDays: 2})
+		_ = json.NewEncoder(w).Encode(syncResult{OK: true, UpsertedDays: 2, SkippedDays: 1})
 	}))
 	defer server.Close()
 
@@ -45,6 +45,9 @@ func TestSyncReportPostsDailyTotals(t *testing.T) {
 	if result.UpsertedDays != 2 {
 		t.Fatalf("upserted days = %d, want 2", result.UpsertedDays)
 	}
+	if result.SkippedDays != 1 {
+		t.Fatalf("skipped days = %d, want 1", result.SkippedDays)
+	}
 	if gotAuth != "Bearer bfm_secret" {
 		t.Fatalf("authorization = %q", gotAuth)
 	}
@@ -62,6 +65,14 @@ func TestSyncReportPostsDailyTotals(t *testing.T) {
 	}
 	if gotPayload.Days[1].DateUTC != "2026-06-22" || gotPayload.Days[1].Usage.Total != 30 || gotPayload.Days[1].Records != 5 {
 		t.Fatalf("bad second day: %#v", gotPayload.Days[1])
+	}
+}
+
+func TestSyncStatusIncludesSkippedDays(t *testing.T) {
+	got := syncStatus(syncResult{UpsertedDays: 2, SkippedDays: 1})
+	want := "ok: 2 days, 1 skipped"
+	if got != want {
+		t.Fatalf("status = %q, want %q", got, want)
 	}
 }
 
