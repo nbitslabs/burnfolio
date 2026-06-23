@@ -80,9 +80,11 @@ async function route(request, env) {
   if (path === "/api/me") return me(request, env);
   if (path === "/api/global/stats" && (request.method === "GET" || request.method === "HEAD")) return globalStatsResponse(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
+  if (path === "/api/profile" && request.method === "PATCH") return updateUserProfileRoute(request, env);
   if (path === "/api/machines" && request.method === "POST") return createMachineRoute(request, env);
   if (path.match(/^\/api\/machines\/[^/]+\/token$/) && request.method === "POST") return rotateMachineTokenRoute(request, env, decodeURIComponent(path.split("/")[3]));
   if (path === "/api/orgs" && request.method === "POST") return createOrgRoute(request, env);
+  if (path.match(/^\/api\/orgs\/[^/]+\/profile$/) && request.method === "PATCH") return updateOrgProfileRoute(request, env, path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/members$/) && request.method === "POST") return addOrgMemberRoute(request, env, path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "PATCH") return updateOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "DELETE") return removeOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
@@ -347,6 +349,20 @@ async function claimHandle(request, env) {
   return json({ account: await accountView(env, user.id) });
 }
 
+async function updateUserProfileRoute(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("profile:user", user.id), 60, 3600],
+  ]);
+  if (limited) return limited;
+  const body = await readBody(request);
+  const fields = cleanProfileMetadata(body);
+  if (fields.error) return json({ error: fields.error }, 400);
+  await updateAccountMetadata(env, user.id, fields);
+  return json({ account: await accountView(env, user.id) });
+}
+
 async function createMachineRoute(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ error: "unauthorized" }, 401);
@@ -422,6 +438,25 @@ async function createOrgRoute(request, env) {
   const org = await createOrg(env, { handle, displayName, ownerUserID: user.id });
   if (org.error) return json(org, 409);
   return json({ org }, 201);
+}
+
+async function updateOrgProfileRoute(request, env, orgRef) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const org = await resolveAccount(env, orgRef);
+  if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
+  const actor = await membershipRole(env, org.id, user.id);
+  if (!canManageOrg(actor)) return json({ error: "forbidden" }, 403);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("org-profile:user", user.id), 60, 3600],
+    [await rateKey("org-profile:org", org.id), 120, 3600],
+  ]);
+  if (limited) return limited;
+  const body = await readBody(request);
+  const fields = cleanProfileMetadata(body);
+  if (fields.error) return json({ error: fields.error }, 400);
+  await updateAccountMetadata(env, org.id, fields);
+  return json({ org: await accountView(env, org.id) });
 }
 
 async function addOrgMemberRoute(request, env, orgRef) {
@@ -627,6 +662,14 @@ async function orgMemberCount(env, orgID) {
   return int(row && row.count);
 }
 
+async function updateAccountMetadata(env, accountID, fields) {
+  await env.DB.prepare(`
+    UPDATE accounts
+    SET bio = ?, website_url = ?, github_url = ?, x_url = ?
+    WHERE id = ?
+  `).bind(fields.bio || null, fields.website_url || null, fields.github_url || null, fields.x_url || null, accountID).run();
+}
+
 async function createUser(env, { email, handle }) {
   const id = crypto.randomUUID();
   const accountNumber = await uniqueAccountNumber(env);
@@ -785,7 +828,7 @@ function machineCanSyncToAccount(machine, account) {
 
 async function accountView(env, id) {
   return env.DB.prepare(`
-    SELECT a.id, a.account_number, a.kind, a.display_name, a.created_at, h.handle
+    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.created_at, h.handle
     FROM accounts a
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE a.id = ?
@@ -797,7 +840,7 @@ async function resolveAccount(env, ref) {
   if (!ref) return null;
   if (ref.length > 80) return null;
   return env.DB.prepare(`
-    SELECT a.id, a.account_number, a.kind, a.display_name, a.created_at, h.handle
+    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.created_at, h.handle
     FROM accounts a
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE a.account_number = ? OR h.handle = ?
@@ -987,6 +1030,7 @@ async function appPage(request, env) {
         <section class="panel">
           <div class="section-head"><div><h2>Profile</h2><p class="muted">${esc(profileHelp)}</p></div></div>
           ${handleControl}
+          ${profileMetadataForm(account, { kind: "user" })}
           <div class="email-list">${emails.map(emailRow).join("") || emptyState("No emails linked", "Add an email to use magic links and recover this profile.")}</div>
           <form class="form-stack" data-email data-email-action data-resend-label="Send verification again"><label for="profile-email">Add another email</label><div class="form-row"><input id="profile-email" name="email" placeholder="you@example.com" autocomplete="email"><button class="secondary">Send verification</button></div></form>
           <pre class="result" data-email-result hidden></pre>
@@ -1009,7 +1053,7 @@ async function orgsPage(request, env) {
   const account = await accountView(env, user.id);
   const profileRef = account.handle || account.account_number;
   const orgs = await env.DB.prepare(`
-    SELECT a.id, a.account_number, h.handle, a.display_name, m.role
+    SELECT a.id, a.account_number, h.handle, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, m.role
     FROM memberships m
     JOIN accounts a ON a.id = m.org_id
     LEFT JOIN handles h ON h.account_id = a.id
@@ -1060,9 +1104,27 @@ function orgDetail(org, members, canManage) {
   const ref = accountRef(org);
   return `
     <div class="section-head"><div><h2>${esc(org.display_name || ref)}</h2><p class="muted"><a href="/${esc(ref)}">/${esc(ref)}</a> · your role is ${esc(org.role)}</p></div></div>
+    ${canManage ? profileMetadataForm(org, { kind: "org", ref }) : ""}
     ${canManage ? `<form class="form-stack org-add-member" data-add-member data-org="${esc(ref)}"><label for="org-member">Add a member or admin</label><div class="form-row"><input id="org-member" name="user" placeholder="username or account number"><select name="role"><option value="member">member</option><option value="admin">admin</option>${org.role === "owner" ? `<option value="owner">owner (transfer)</option>` : ""}</select><button>Add</button></div></form>` : `<p class="muted">Members can view the org here. Ask an admin or owner to change roles.</p>`}
     <div class="member-list">${members.map((member) => orgMemberRow(org, member, canManage)).join("")}</div>
   `;
+}
+
+function profileMetadataForm(account, { kind, ref = "" }) {
+  const prefix = kind === "org" ? `org-profile-${account.account_number}` : "profile";
+  const attrs = kind === "org"
+    ? `data-org-profile data-org="${esc(ref || accountRef(account))}"`
+    : "data-profile";
+  return `<form class="form-stack profile-meta-form" ${attrs}>
+    <label for="${esc(prefix)}-bio">Bio</label>
+    <textarea id="${esc(prefix)}-bio" name="bio" maxlength="280" rows="4" placeholder="What are you building?">${esc(account.bio || "")}</textarea>
+    <div class="form-row">
+      <label class="field-inline" for="${esc(prefix)}-website"><span>Website</span><input id="${esc(prefix)}-website" name="website_url" placeholder="https://example.com" value="${esc(account.website_url || "")}"></label>
+      <label class="field-inline" for="${esc(prefix)}-github"><span>GitHub</span><input id="${esc(prefix)}-github" name="github_url" placeholder="github.com/username" value="${esc(account.github_url || "")}"></label>
+      <label class="field-inline" for="${esc(prefix)}-x"><span>X.com</span><input id="${esc(prefix)}-x" name="x_url" placeholder="x.com/username" value="${esc(account.x_url || "")}"></label>
+    </div>
+    <div class="form-actions"><button type="submit" class="secondary">Save profile details</button><span class="result inline-result" data-profile-result hidden></span></div>
+  </form>`;
 }
 
 function orgMemberRow(org, member, canManage) {
@@ -1135,6 +1197,7 @@ function profileHtml(profile, isSignedIn = false) {
         </div>
         <div class="actions"><button class="share-button" type="button" data-share-open data-share-image="${esc(shareImagePath)}" data-share-text="${esc(shareText)}">Share</button><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
       </header>
+      ${profileAbout(profile.account)}
       <section class="stats">
         ${statCard("Total burn", formatCompact(profile.total_tokens), `${formatInt(profile.total_tokens)} exact`)}
         ${statCard("Active days", formatInt(stats.active_days))}
@@ -1158,6 +1221,23 @@ function profileHtml(profile, isSignedIn = false) {
     siteName: "Burnfolio",
     signedIn: isSignedIn,
   });
+}
+
+function profileAbout(account) {
+  const links = profileLinks(account);
+  if (!account.bio && links.length === 0) return "";
+  return `<section class="profile-about">
+    ${account.bio ? `<p>${esc(account.bio)}</p>` : ""}
+    ${links.length ? `<div class="profile-links">${links.map((link) => `<a href="${esc(link.href)}" rel="me noopener noreferrer" target="_blank">${link.icon}<span>${esc(link.label)}</span></a>`).join("")}</div>` : ""}
+  </section>`;
+}
+
+function profileLinks(account) {
+  const links = [];
+  if (account.website_url) links.push({ href: account.website_url, label: displayURL(account.website_url), icon: faIcon("website") });
+  if (account.github_url) links.push({ href: account.github_url, label: githubLabel(account.github_url), icon: faIcon("github") });
+  if (account.x_url) links.push({ href: account.x_url, label: xLabel(account.x_url), icon: faIcon("x") });
+  return links;
 }
 
 function shareCopy(profile, displayName) {
@@ -1773,6 +1853,18 @@ function faIcon(name) {
       viewBox: "0 0 640 512",
       path: "M144 0a80 80 0 1 1 0 160A80 80 0 1 1 144 0zM512 0a80 80 0 1 1 0 160A80 80 0 1 1 512 0zM0 298.7C0 239.8 47.8 192 106.7 192h42.7c15.9 0 31 3.5 44.6 9.7c-1.3 7.2-1.9 14.7-1.9 22.3c0 38.2 16.8 72.5 43.3 96H21.3C9.6 320 0 310.4 0 298.7zM405.3 320c26.5-23.5 43.3-57.8 43.3-96c0-7.6-.7-15-1.9-22.3c13.6-6.3 28.7-9.7 44.6-9.7h42.7C592.2 192 640 239.8 640 298.7c0 11.8-9.6 21.3-21.3 21.3H405.3zM224 224a96 96 0 1 1 192 0 96 96 0 1 1 -192 0zM128 485.3C128 411.7 187.7 352 261.3 352h117.3C452.3 352 512 411.7 512 485.3c0 14.7-11.9 26.7-26.7 26.7H154.7c-14.7 0-26.7-11.9-26.7-26.7z",
     },
+    website: {
+      viewBox: "0 0 512 512",
+      path: "M352 256c0 22.2-1.2 43.6-3.3 64H163.3c-2.2-20.4-3.3-41.8-3.3-64s1.2-43.6 3.3-64H348.7c2.2 20.4 3.3 41.8 3.3 64zm28.8-64H503.9c5.3 20.5 8.1 41.9 8.1 64s-2.8 43.5-8.1 64H380.8c2.1-20.6 3.2-42 3.2-64s-1.1-43.4-3.2-64zm112.6-32H376.7c-10-63.9-29.8-117.4-55.3-151.6C397.5 30.9 458.4 87.9 493.4 160zM344.3 160H167.7c6.1-36.4 15.5-68.6 27-94.7C212.5 24.9 234.1 0 256 0s43.5 24.9 61.3 65.3c11.5 26.1 20.9 58.2 27 94.7zm-209 0H18.6C53.6 87.9 114.5 30.9 190.6 8.4C165.1 42.6 145.3 96.1 135.3 160zM8.1 192H131.2c-2.1 20.6-3.2 42-3.2 64s1.1 43.4 3.2 64H8.1C2.8 299.5 0 278.1 0 256s2.8-43.5 8.1-64zM167.7 352H344.3c-6.1 36.4-15.5 68.6-27 94.7C299.5 487.1 277.9 512 256 512s-43.5-24.9-61.3-65.3c-11.5-26.1-20.9-58.2-27-94.7zm-32.4 0c10 63.9 29.8 117.4 55.3 151.6C114.5 481.1 53.6 424.1 18.6 352H135.3zm358.1 0c-35 72.1-95.9 129.1-172 151.6c25.5-34.2 45.3-87.7 55.3-151.6H493.4z",
+    },
+    github: {
+      viewBox: "0 0 496 512",
+      path: "M165.9 397.4c0 2-2.3 3.6-5.2 3.6c-3.3 .3-5.6-1.3-5.6-3.6c0-2 2.3-3.6 5.2-3.6c3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9c2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9c.3 2 2.9 3.3 5.9 2.6c2.9-.7 4.9-2.6 4.6-4.6c-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2c12.8 2.3 17.3-5.6 17.3-12.1c0-6.2-.3-40.4-.3-61.4c0 0-70 15-84.7-29.8c0 0-11.4-29.1-27.8-36.6c0 0-22.9-15.7 1.6-15.4c0 0 24.9 2 38.6 25.8c21.9 38.6 58.6 27.5 72.9 20.9c2.3-16 8.8-27.1 16-33.7c-55.9-6.2-112.3-14.3-112.3-110.5c0-27.5 7.6-41.3 23.6-58.9c-2.6-6.5-11.1-33.3 2.6-67.9c20.9-6.5 69 27 69 27c20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27c13.7 34.6 5.2 61.4 2.6 67.9c16 17.7 25.8 31.5 25.8 58.9c0 96.5-58.9 104.2-114.8 110.5c9.2 7.9 17 22.9 17 46.4c0 33.7-.3 75.4-.3 86.2c0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252C496 113.3 383.5 8 244.8 8z",
+    },
+    x: {
+      viewBox: "0 0 512 512",
+      path: "M389.2 48h70.6L305.6 224.2L487 464H345L233.7 318.6L106.5 464H35.8L200.7 275.5L26.8 48H172.4L272.9 180.9L389.2 48zM364.4 421.8h39.1L151.1 88h-42L364.4 421.8z",
+    },
   };
   const icon = icons[name] || icons.user;
   return `<svg class="fa-icon" aria-hidden="true" viewBox="${icon.viewBox}" focusable="false"><path fill="currentColor" d="${icon.path}"></path></svg>`;
@@ -2107,6 +2199,7 @@ function dashboardScript(profileRef) {
         invalid_handle: "Choose a username with 3-32 letters, numbers, underscores, or hyphens.",
         handle_unavailable: "That username is already taken.",
         invalid_email: "Enter a valid email address.",
+        invalid_url: "Use valid website, GitHub, and X.com links.",
         email_already_claimed: "That email is already attached to another account.",
         email_send_failed: "The email could not be sent. Try again shortly.",
         org_handle_unavailable: "That organization username is already taken.",
@@ -2160,6 +2253,12 @@ function dashboardScript(profileRef) {
     async function post(form, url) {
       const body = Object.fromEntries(new FormData(form).entries());
       const res = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      return { ok: res.ok, data };
+    }
+    async function patch(form, url) {
+      const body = Object.fromEntries(new FormData(form).entries());
+      const res = await fetch(url, { method:"PATCH", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
       return { ok: res.ok, data };
     }
@@ -2234,6 +2333,26 @@ function dashboardScript(profileRef) {
         restoreButton(button);
       }
     });
+    document.querySelector("[data-profile]")?.addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const button = submitButton(form);
+      const out = form.querySelector("[data-profile-result]");
+      setBusy(button, "Saving...");
+      if (out) {
+        out.hidden = false;
+        out.textContent = "Saving...";
+      }
+      try {
+        const { ok, data } = await patch(form, "/api/profile");
+        if (out) out.textContent = ok ? "Saved." : messageFor(data);
+        if (!ok) restoreButton(button);
+        else setTimeout(() => restoreButton(button), 900);
+      } catch {
+        if (out) out.textContent = "Something went wrong. Check the links and try again.";
+        restoreButton(button);
+      }
+    });
     document.querySelector("[data-email]").addEventListener("submit", async e => {
       e.preventDefault();
       const form = e.currentTarget;
@@ -2288,6 +2407,7 @@ function orgManagementScript() {
       const messages = {
         unauthorized: "Your session expired. Sign in again.",
         invalid_handle: "Choose a different username. Some app paths are reserved.",
+        invalid_url: "Use valid website, GitHub, and X.com links.",
         org_not_found: "Organization not found.",
         forbidden: "Only org admins or owners can manage members.",
         owner_required: "Only the current owner can transfer ownership.",
@@ -2339,6 +2459,26 @@ function orgManagementScript() {
         if (!ok) restoreControl(button);
       } catch {
         alert("Something went wrong. Check the inputs and try again.");
+        restoreControl(button);
+      }
+    }));
+    document.querySelectorAll("[data-org-profile]").forEach(form => form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const button = submitButton(form);
+      const out = form.querySelector("[data-profile-result]");
+      const body = Object.fromEntries(new FormData(form).entries());
+      setBusy(button, "Saving...");
+      if (out) {
+        out.hidden = false;
+        out.textContent = "Saving...";
+      }
+      try {
+        const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/profile", "PATCH", body);
+        if (out) out.textContent = ok ? "Saved." : messageFor(data);
+        if (!ok) restoreControl(button);
+        else setTimeout(() => restoreControl(button), 900);
+      } catch {
+        if (out) out.textContent = "Something went wrong. Check the links and try again.";
         restoreControl(button);
       }
     }));
@@ -2685,6 +2825,76 @@ function cleanVersion(value) {
 function cleanTheme(value) {
   value = String(value || "").trim().toLowerCase();
   return EMBED_THEMES.includes(value) ? value : "orange";
+}
+
+function cleanProfileMetadata(body) {
+  const bio = cleanText(body.bio, 280);
+  const website = cleanWebsiteURL(body.website_url || body.website);
+  const github = cleanSocialURL(body.github_url || body.github, "github.com");
+  const x = cleanSocialURL(body.x_url || body.x || body.twitter, "x.com");
+  if (website === null || github === null || x === null) return { error: "invalid_url" };
+  return { bio, website_url: website, github_url: github, x_url: x };
+}
+
+function cleanWebsiteURL(value) {
+  value = String(value || "").trim();
+  if (!value) return "";
+  if (!value.match(/^https?:\/\//i)) value = `https://${value}`;
+  return cleanURLForHost(value, null);
+}
+
+function cleanSocialURL(value, host) {
+  value = String(value || "").trim().replace(/^@/, "");
+  if (!value) return "";
+  if (!value.match(/^https?:\/\//i)) {
+    const lower = value.toLowerCase().replace(/^www\./, "");
+    value = lower === host || lower.startsWith(`${host}/`) ? `https://${value}` : `https://${host}/${value}`;
+  }
+  return cleanURLForHost(value, host);
+}
+
+function cleanURLForHost(value, expectedHost) {
+  if (value.length > 240) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    url.hash = "";
+    if (expectedHost) {
+      const host = url.hostname.toLowerCase().replace(/^www\./, "");
+      if (host !== expectedHost) return null;
+      if (!url.pathname || url.pathname === "/") return null;
+    }
+    return url.toString().slice(0, 240);
+  } catch {
+    return null;
+  }
+}
+
+function displayURL(value) {
+  try {
+    const url = new URL(value);
+    return `${url.hostname.replace(/^www\./, "")}${url.pathname === "/" ? "" : url.pathname}`.replace(/\/$/, "");
+  } catch {
+    return value;
+  }
+}
+
+function githubLabel(value) {
+  return socialPathLabel(value, "GitHub");
+}
+
+function xLabel(value) {
+  return socialPathLabel(value, "X.com");
+}
+
+function socialPathLabel(value, fallback) {
+  try {
+    const url = new URL(value);
+    const handle = url.pathname.split("/").filter(Boolean)[0];
+    return handle ? `@${handle}` : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function embedThemeQuery(theme) {

@@ -187,18 +187,25 @@ button[aria-busy="true"]:hover {
   background: var(--burnfolio-linen);
 }
 input,
-select {
+select,
+textarea {
   border: 1px solid var(--burnfolio-line);
   background: var(--burnfolio-linen);
   color: var(--burnfolio-ink);
   border-radius: var(--burnfolio-r-s);
   padding: 12px 13px;
   min-width: 0;
+  font: inherit;
+}
+textarea {
+  resize: vertical;
+  line-height: 1.45;
 }
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--burnfolio-flame);
   outline-offset: 3px;
 }
@@ -597,6 +604,52 @@ form {
   font-size: 13px;
   line-height: 1;
   flex: 0 0 auto;
+}
+.profile-about {
+  display: grid;
+  gap: 12px;
+  max-width: 760px;
+  margin: 18px 0 0 21px;
+}
+.profile-about p {
+  margin: 0;
+  color: var(--burnfolio-ink);
+  font-size: 16px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.profile-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.profile-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--burnfolio-line);
+  border-radius: var(--burnfolio-r-pill);
+  background: var(--burnfolio-linen);
+  color: var(--burnfolio-ink);
+  font-size: 13px;
+  font-weight: 800;
+  max-width: 100%;
+}
+.profile-links a:hover {
+  background: var(--burnfolio-wash);
+}
+.profile-links .fa-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--burnfolio-blaze);
+  flex: 0 0 auto;
+}
+.profile-links span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .summary-separator {
   width: 1px;
@@ -999,6 +1052,37 @@ body.share-open {
   color: var(--burnfolio-ink);
   font-size: 13px;
   font-weight: 800;
+}
+.field-inline {
+  display: grid;
+  gap: 6px;
+  flex: 1 1 190px;
+  min-width: 0;
+}
+.field-inline span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.field-inline input {
+  width: 100%;
+}
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.inline-result {
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.profile-meta-form {
+  padding: 12px;
+  border: 1px solid var(--burnfolio-line);
+  border-radius: var(--burnfolio-r-m);
+  background: var(--burnfolio-wash);
 }
 .profile-field {
   display: grid;
