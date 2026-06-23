@@ -1228,27 +1228,32 @@ function svgEmbed(profile, theme = "orange") {
   const left = 22;
   const top = 62;
   const colors = embedPalette(theme);
+  const columns = Math.ceil(cells.length / 7);
+  const gridWidth = columns * cellSize + Math.max(0, columns - 1) * gap;
+  const gridBottom = top + 7 * cellSize + 6 * gap;
+  const footerBaseline = gridBottom + 28;
+  const legendX = Math.max(left, left + gridWidth - 138);
   const rects = cells.map((cell, i) => {
     const x = left + Math.floor(i / 7) * (cellSize + gap);
     const y = top + (i % 7) * (cellSize + gap);
     return `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="2" fill="${colors[cell.level]}"><title>${esc(cell.date)}: ${formatInt(cell.value)}</title></rect>`;
   }).join("");
-  const width = left * 2 + Math.ceil(cells.length / 7) * (cellSize + gap);
-  const height = 184;
+  const width = left * 2 + gridWidth;
+  const height = footerBaseline + 22;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(name)} Burnfolio token burn graph">
   <rect width="100%" height="100%" rx="8" fill="#1C140D"/>
   <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#3A2A1B"/>
   <text x="22" y="30" fill="#FBF1E6" font-family="Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
   <text x="22" y="50" fill="#BBA68E" font-family="Space Mono, ui-monospace, monospace" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active days</text>
   ${rects}
-  <text x="22" y="164" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
-  <rect x="55" y="155" width="10" height="10" rx="2" fill="${colors[0]}"/>
-  <rect x="70" y="155" width="10" height="10" rx="2" fill="${colors[1]}"/>
-  <rect x="85" y="155" width="10" height="10" rx="2" fill="${colors[2]}"/>
-  <rect x="100" y="155" width="10" height="10" rx="2" fill="${colors[3]}"/>
-  <rect x="115" y="155" width="10" height="10" rx="2" fill="${colors[4]}"/>
-  <text x="132" y="164" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
-  <text x="${width - 22}" y="164" text-anchor="end" fill="#FF8A3D" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700">burnfolio.ai</text>
+  <text x="22" y="${footerBaseline}" fill="#FF8A3D" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700">burnfolio.ai</text>
+  <text x="${legendX}" y="${footerBaseline}" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
+  <rect x="${legendX + 33}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[0]}"/>
+  <rect x="${legendX + 48}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[1]}"/>
+  <rect x="${legendX + 63}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[2]}"/>
+  <rect x="${legendX + 78}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[3]}"/>
+  <rect x="${legendX + 93}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[4]}"/>
+  <text x="${legendX + 110}" y="${footerBaseline}" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
 </svg>`;
 }
 
