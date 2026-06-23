@@ -65,7 +65,7 @@ async function route(request, env) {
   if (path === "/og/landing.png") return assetResponse("og-landing.png");
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
-  if (path === "/") return html(homePage(await signedIn(request, env), await globalStats(request, env)));
+  if (path === "/") return html(homePage(await signedIn(request, env), await globalStats(request, env), await platformStats(env)));
   if (path === "/signup") return authRoute(request, env, "signup");
   if (path === "/signin") return authRoute(request, env, "signin");
   if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
@@ -313,6 +313,19 @@ async function readGlobalStats(env) {
 
 function emptyGlobalStats() {
   return { days: [], total_tokens: 0, last_year_tokens: 0 };
+}
+
+async function platformStats(env) {
+  const row = await env.DB.prepare(`
+    SELECT
+      SUM(CASE WHEN kind = 'user' THEN 1 ELSE 0 END) AS users,
+      SUM(CASE WHEN kind = 'org' THEN 1 ELSE 0 END) AS orgs
+    FROM accounts
+  `).first();
+  return {
+    users: int(row && row.users),
+    orgs: int(row && row.orgs),
+  };
 }
 
 async function claimHandle(request, env) {
@@ -580,8 +593,9 @@ async function buildProfile(env, ref) {
   const account = await resolveAccount(env, ref);
   if (!account) return null;
   const days = account.kind === "org" ? await orgDays(env, account.id) : await userDays(env, account.id);
+  const memberCount = account.kind === "org" ? await orgMemberCount(env, account.id) : 0;
   const total = days.reduce((sum, day) => sum + day.total_tokens, 0);
-  return { account, days, total_tokens: total, stats: profileStats(days, total), embed_url: `/embed/${account.handle || account.account_number}` };
+  return { account, days, total_tokens: total, stats: profileStats(days, total), member_count: memberCount, embed_url: `/embed/${account.handle || account.account_number}` };
 }
 
 async function userDays(env, userID) {
@@ -605,6 +619,11 @@ async function orgDays(env, orgID) {
     ORDER BY d.date_utc
   `).bind(orgID).all();
   return rows.results.map(dayRow);
+}
+
+async function orgMemberCount(env, orgID) {
+  const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM memberships WHERE org_id = ?").bind(orgID).first();
+  return int(row && row.count);
 }
 
 async function createUser(env, { email, handle }) {
@@ -811,7 +830,7 @@ async function uniqueAccountNumber(env) {
   throw new Error("account_number_exhausted");
 }
 
-function homePage(isSignedIn = false, global = emptyGlobalStats()) {
+function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { users: 0, orgs: 0 }) {
   const globalTotal = formatCompact(global.total_tokens);
   const globalSubtitle = `${formatInt(global.last_year_tokens)} tokens burned globally`;
   return layout("Burnfolio — Show your burn", `
@@ -831,6 +850,10 @@ function homePage(isSignedIn = false, global = emptyGlobalStats()) {
         <section class="showcase">
           <div class="showcase-top">
             <div><span>Global burn graph</span><strong>${esc(globalTotal)} tokens burned</strong></div>
+            <div class="showcase-counts" aria-label="Burnfolio account counts">
+              <span>${faIcon("user")} ${formatInt(counts.users)} users</span>
+              <span>${faIcon("org")} ${formatInt(counts.orgs)} orgs</span>
+            </div>
           </div>
           ${heatmap(global.days, { title: "Past year", subtitle: globalSubtitle })}
           <div class="steps">
@@ -1108,7 +1131,7 @@ function profileHtml(profile, isSignedIn = false) {
     <main class="profile">
       <header class="profile-head">
         <div>
-          <div class="badges"><span>${esc(profile.account.kind)} profile</span>${hasHandle || hasLabel ? "" : `<span>anonymous</span>`}</div>
+          <div class="badges"><span class="icon-badge" aria-label="${esc(profile.account.kind)}">${faIcon(profile.account.kind)}</span>${hasHandle || hasLabel ? "" : `<span>anonymous</span>`}</div>
           <h1>${esc(displayName)}</h1>
           <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active days</p>
         </div>
@@ -1117,6 +1140,7 @@ function profileHtml(profile, isSignedIn = false) {
       <section class="stats">
         ${statCard("Total burn", formatCompact(profile.total_tokens), `${formatInt(profile.total_tokens)} exact`)}
         ${statCard("Active days", formatInt(stats.active_days))}
+        ${profile.account.kind === "org" ? statCard("Members", formatInt(profile.member_count)) : ""}
         ${statCard("Best day", formatCompact(stats.best_day_tokens), stats.best_day ? formatDate(stats.best_day) : "No activity yet")}
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
       </section>
@@ -1708,6 +1732,21 @@ function monthLabels(data) {
 
 function legend() {
   return `<div class="legend"><span>Less</span><i class="cell l0"></i><i class="cell l1"></i><i class="cell l2"></i><i class="cell l3"></i><i class="cell l4"></i><span>More</span></div>`;
+}
+
+function faIcon(name) {
+  const icons = {
+    user: {
+      viewBox: "0 0 448 512",
+      path: "M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3C0 498.7 13.3 512 29.7 512H418.3c16.4 0 29.7-13.3 29.7-29.7C448 383.8 368.2 304 269.7 304H178.3z",
+    },
+    org: {
+      viewBox: "0 0 640 512",
+      path: "M144 0a80 80 0 1 1 0 160A80 80 0 1 1 144 0zM512 0a80 80 0 1 1 0 160A80 80 0 1 1 512 0zM0 298.7C0 239.8 47.8 192 106.7 192h42.7c15.9 0 31 3.5 44.6 9.7c-1.3 7.2-1.9 14.7-1.9 22.3c0 38.2 16.8 72.5 43.3 96H21.3C9.6 320 0 310.4 0 298.7zM405.3 320c26.5-23.5 43.3-57.8 43.3-96c0-7.6-.7-15-1.9-22.3c13.6-6.3 28.7-9.7 44.6-9.7h42.7C592.2 192 640 239.8 640 298.7c0 11.8-9.6 21.3-21.3 21.3H405.3zM224 224a96 96 0 1 1 192 0 96 96 0 1 1 -192 0zM128 485.3C128 411.7 187.7 352 261.3 352h117.3C452.3 352 512 411.7 512 485.3c0 14.7-11.9 26.7-26.7 26.7H154.7c-14.7 0-26.7-11.9-26.7-26.7z",
+    },
+  };
+  const icon = icons[name] || icons.user;
+  return `<svg class="fa-icon" aria-hidden="true" viewBox="${icon.viewBox}" focusable="false"><path fill="currentColor" d="${icon.path}"></path></svg>`;
 }
 
 function statCard(label, value, detail = "") {

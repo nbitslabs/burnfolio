@@ -324,6 +324,34 @@ form {
   gap: 18px;
   margin-bottom: 18px;
 }
+.showcase-counts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.showcase-counts span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--burnfolio-line);
+  border-radius: var(--burnfolio-r-pill);
+  background: var(--burnfolio-wash);
+  color: var(--burnfolio-ink);
+  font-family: "Space Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+.fa-icon {
+  width: 1em;
+  height: 1em;
+  display: inline-block;
+  flex: 0 0 auto;
+}
 .showcase-top span,
 .secret span,
 .snippet span,
@@ -334,6 +362,11 @@ form {
   text-transform: uppercase;
   font-weight: 900;
   font-family: "Space Mono", ui-monospace, monospace;
+}
+.showcase-top .showcase-counts span {
+  display: inline-flex;
+  color: var(--burnfolio-ink);
+  text-transform: none;
 }
 .showcase-top strong {
   display: block;
@@ -535,6 +568,9 @@ form {
   flex-wrap: wrap;
 }
 .badges span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--burnfolio-line);
   background: var(--burnfolio-wash);
   border-radius: 999px;
@@ -543,10 +579,18 @@ form {
   font-size: 12px;
   font-weight: 800;
 }
+.badges .icon-badge {
+  width: 34px;
+  height: 30px;
+  padding: 0;
+}
+.badges .icon-badge .fa-icon {
+  font-size: 14px;
+}
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px;
   margin: 32px 0;
 }
