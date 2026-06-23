@@ -74,7 +74,7 @@ Useful installer flags:
 --providers amp,claude,codebuff,codex,copilot,droid,gemini,goose,hermes,kilo,kimi,openclaw,opencode,pi,qwen
 --server https://burnfolio.ai
 --install-dir ~/.local/bin
---version v0.1.1
+--version v0.1.2
 ```
 
 Uninstall disables Burnfolio cron sync and marks the local install as
