@@ -63,7 +63,7 @@ Useful installer flags:
 --providers claude,codex,opencode,pi
 --server https://burnfolio.ai
 --install-dir ~/.local/bin
---version v0.1.0
+--version v0.1.1
 ```
 
 Uninstall disables Burnfolio cron sync and marks the local install as

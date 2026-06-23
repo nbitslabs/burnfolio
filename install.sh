@@ -250,7 +250,11 @@ fi
 
 if [ "$run_sync" = "1" ]; then
   echo "Running initial sync..."
-  "$pyro_path"
+  if [ -n "$profile" ]; then
+    "$pyro_path" --providers "$providers" --server "$server" --profile "$profile" --machine "$machine"
+  else
+    "$pyro_path"
+  fi
 fi
 
 if [ -n "$profile" ] && [ "$schedule" != "" ] && [ "$schedule" != "none" ]; then
@@ -260,7 +264,7 @@ if [ -n "$profile" ] && [ "$schedule" != "" ] && [ "$schedule" != "none" ]; then
     daily) cron_time="17 3 * * *" ;;
   esac
   cron_marker="# burnfolio-pyro ${profile}"
-  sync_cmd="$(shell_quote "$pyro_path")"
+  sync_cmd="$(shell_quote "$pyro_path") --providers $(shell_quote "$providers") --server $(shell_quote "$server") --profile $(shell_quote "$profile") --machine $(shell_quote "$machine")"
   cron_line="${cron_time} ${sync_cmd} >/tmp/burnfolio-pyro.log 2>&1 ${cron_marker}"
   current="$(crontab -l 2>/dev/null | grep -vF "$cron_marker" || true)"
   printf '%s\n%s\n' "$current" "$cron_line" | sed '/^$/d' | crontab -
