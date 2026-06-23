@@ -13,6 +13,12 @@ type Options struct {
 	IncludeRaw bool
 }
 
+const defaultProviderList = "amp,claude,codebuff,codex,copilot,droid,gemini,goose,hermes,kilo,kimi,openclaw,opencode,pi,qwen"
+
+func DefaultProviderList() string {
+	return defaultProviderList
+}
+
 type TokenUsage struct {
 	Input      int64 `json:"input"`
 	Output     int64 `json:"output"`
@@ -26,7 +32,7 @@ func (t TokenUsage) Burn() int64 {
 	if t.Total > 0 {
 		return t.Total
 	}
-	return t.Input + t.Output + t.CacheRead + t.CacheWrite
+	return t.Input + t.Output + t.CacheRead + t.CacheWrite + t.Reasoning
 }
 
 func (t *TokenUsage) Add(other TokenUsage) {
@@ -114,7 +120,7 @@ func eventDateUTC(ts *time.Time) string {
 
 func sortedProviderNames(selected map[string]bool) []string {
 	if len(selected) == 0 {
-		return []string{"claude", "codex", "opencode", "pi"}
+		return strings.Split(defaultProviderList, ",")
 	}
 	names := make([]string, 0, len(selected))
 	for name := range selected {

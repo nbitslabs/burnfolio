@@ -10,10 +10,21 @@ import (
 type collector func(context.Context, Options) ([]Event, []string, error)
 
 var collectors = map[string]collector{
+	"amp":      collectAmp,
 	"claude":   collectClaude,
+	"codebuff": collectCodebuff,
 	"codex":    collectCodex,
+	"copilot":  collectCopilot,
+	"droid":    collectDroid,
+	"gemini":   collectGemini,
+	"goose":    collectGoose,
+	"hermes":   collectHermes,
+	"kilo":     collectKilo,
+	"kimi":     collectKimi,
+	"openclaw": collectOpenClaw,
 	"opencode": collectOpenCode,
 	"pi":       collectPi,
+	"qwen":     collectQwen,
 }
 
 func Collect(ctx context.Context, opts Options) (Report, error) {

@@ -77,7 +77,8 @@ func main() {
 	}
 
 	flag.StringVar(&home, "home", defaultHome, "home directory containing agent data")
-	flag.StringVar(&providers, "providers", "claude,codex,opencode,pi", "comma-separated providers to scan")
+	defaultProviders := usage.DefaultProviderList()
+	flag.StringVar(&providers, "providers", defaultProviders, "comma-separated providers to scan")
 	flag.BoolVar(&jsonOutput, "json", false, "print JSON instead of a table")
 	flag.StringVar(&profile, "profile", "", "Burnfolio account number or username to sync to")
 	flag.StringVar(&machine, "machine", "", "Burnfolio machine token for sync")
@@ -92,7 +93,7 @@ func main() {
 	}
 
 	cfg, _ := loadConfig(defaultHome)
-	if providers == "claude,codex,opencode,pi" && cfg.Providers != "" {
+	if providers == defaultProviders && cfg.Providers != "" {
 		providers = cfg.Providers
 	}
 	if profile == "" && cfg.Installed {
@@ -229,7 +230,7 @@ func installCmd(args []string) error {
 	profile := fs.String("profile", cfg.Profile, "Burnfolio profile")
 	machine := fs.String("machine", cfg.Machine, "Burnfolio machine token")
 	server := fs.String("server", valueOr(cfg.Server, defaultServer()), "Burnfolio server URL")
-	providers := fs.String("providers", valueOr(cfg.Providers, "claude,codex,opencode,pi"), "providers to scan")
+	providers := fs.String("providers", valueOr(cfg.Providers, usage.DefaultProviderList()), "providers to scan")
 	installDir := fs.String("install-dir", cfg.InstallDir, "install directory")
 	schedule := fs.String("schedule", "", "recorded schedule")
 	if err := fs.Parse(args); err != nil {
@@ -302,7 +303,7 @@ func statusCmd(args []string) error {
 	fmt.Printf("profile: %s\n", valueOr(cfg.Profile, "(not configured)"))
 	fmt.Printf("machine: %s\n", masked(cfg.Machine))
 	fmt.Printf("server: %s\n", valueOr(cfg.Server, defaultServer()))
-	fmt.Printf("providers: %s\n", valueOr(cfg.Providers, "claude,codex,opencode,pi"))
+	fmt.Printf("providers: %s\n", valueOr(cfg.Providers, usage.DefaultProviderList()))
 	if cfg.LastSyncAt != "" {
 		fmt.Printf("last_sync: %s %s\n", cfg.LastSyncAt, cfg.LastSyncStatus)
 	}
@@ -316,7 +317,7 @@ func loadConfig(home string) (config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg.Server = defaultServer()
-			cfg.Providers = "claude,codex,opencode,pi"
+			cfg.Providers = usage.DefaultProviderList()
 			return cfg, nil
 		}
 		return cfg, err
@@ -328,7 +329,7 @@ func loadConfig(home string) (config, error) {
 		cfg.Server = defaultServer()
 	}
 	if cfg.Providers == "" {
-		cfg.Providers = "claude,codex,opencode,pi"
+		cfg.Providers = usage.DefaultProviderList()
 	}
 	return cfg, nil
 }

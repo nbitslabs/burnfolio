@@ -6,40 +6,44 @@ import (
 )
 
 func collectPi(ctx context.Context, opts Options) ([]Event, []string, error) {
-	root := filepath.Join(opts.HomeDir, ".pi", "agent", "sessions")
 	var events []Event
 	var warnings []string
 	var parseErrors int
 
-	err := walkFiles(root, func(path string) bool {
-		return hasExt(path, ".jsonl")
-	}, func(path string) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	for _, root := range piRoots(opts.HomeDir) {
+		err := walkFiles(root, func(path string) bool {
+			return hasExt(path, ".jsonl")
+		}, func(path string) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 
-		err := readJSONL(path, func(_ int, obj object) error {
-			event, ok := parsePiEvent(path, obj)
-			if ok {
-				events = append(events, event)
+			err := readJSONL(path, func(_ int, obj object) error {
+				event, ok := parsePiEvent(path, obj)
+				if ok {
+					events = append(events, event)
+				}
+				return nil
+			})
+			if err != nil {
+				parseErrors++
+				if parseErrors <= opts.MaxErrors {
+					warnings = append(warnings, err.Error())
+				}
 			}
 			return nil
 		})
 		if err != nil {
-			parseErrors++
-			if parseErrors <= opts.MaxErrors {
-				warnings = append(warnings, err.Error())
-			}
+			return events, warnings, err
 		}
-		return nil
-	})
+	}
 
 	if parseErrors > opts.MaxErrors {
 		warnings = append(warnings, "pi: additional parse errors suppressed")
 	}
-	return events, warnings, err
+	return events, warnings, nil
 }
 
 func parsePiEvent(path string, obj object) (Event, bool) {
@@ -70,7 +74,14 @@ func parsePiEvent(path string, obj object) (Event, bool) {
 		CostUSD: getFloat(usage, "cost", "total"),
 	}
 	if event.Provider == "" {
-		event.Provider = "openai"
+		event.Provider = inferProvider(event.Model, "pi")
 	}
 	return event, event.Usage.Burn() > 0
+}
+
+func piRoots(home string) []string {
+	if dirs := envDirs("PI_AGENT_DIR"); len(dirs) > 0 {
+		return dirs
+	}
+	return existingDirs(filepath.Join(home, ".pi", "agent", "sessions"))
 }

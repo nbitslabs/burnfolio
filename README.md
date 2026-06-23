@@ -8,10 +8,21 @@ storage and Cloudflare Email Service for optional magic-link sign-in.
 
 Current collectors:
 
-- Claude: `~/.claude`
-- Codex: `~/.codex/sessions`
-- OpenCode: `~/.config/opencode`
-- Pi: `~/.pi/agent/sessions`
+- Claude Code: `~/.config/claude/projects` and `~/.claude/projects`
+- Codex: `${CODEX_HOME:-~/.codex}/sessions` and `archived_sessions`
+- OpenCode: `${OPENCODE_DATA_DIR:-~/.local/share/opencode}`
+- Pi: `${PI_AGENT_DIR:-~/.pi/agent/sessions}`
+- Amp: `${AMP_DATA_DIR:-~/.local/share/amp}`
+- Droid: `${DROID_SESSIONS_DIR:-~/.factory/sessions}`
+- Codebuff: `${CODEBUFF_DATA_DIR}` or `~/.config/manicode*`
+- Hermes Agent: `${HERMES_HOME:-~/.hermes}/state.db`
+- Goose: local `sessions.db` roots or `GOOSE_PATH_ROOT`
+- Kilo: `${KILO_DATA_DIR:-~/.local/share/kilo}/kilo.db`
+- Kimi: `${KIMI_DATA_DIR:-~/.kimi}`
+- OpenClaw: `~/.openclaw`, `~/.clawdbot`, `~/.moltbot`, `~/.moldbot`
+- Qwen Code: `${QWEN_DATA_DIR:-~/.qwen}`
+- GitHub Copilot CLI: `~/.copilot/otel/*.jsonl` or `COPILOT_OTEL_FILE_EXPORTER_PATH`
+- Gemini CLI: `${GEMINI_DATA_DIR:-~/.gemini/tmp}`
 
 ## Install Pyro
 
@@ -60,7 +71,7 @@ Useful installer flags:
 --profile <account-or-username>
 --machine <machine-token>
 --schedule <none|hourly|daily>
---providers claude,codex,opencode,pi
+--providers amp,claude,codebuff,codex,copilot,droid,gemini,goose,hermes,kilo,kimi,openclaw,opencode,pi,qwen
 --server https://burnfolio.ai
 --install-dir ~/.local/bin
 --version v0.1.1
@@ -102,7 +113,7 @@ pyro
 Useful CLI flags:
 
 ```sh
-pyro --providers claude,codex
+pyro --providers claude,codex,opencode,pi
 pyro --json
 pyro --no-sync
 pyro --home /path/to/home

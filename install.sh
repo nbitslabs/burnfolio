@@ -7,7 +7,7 @@ install_dir="${PYRO_INSTALL_DIR:-}"
 profile=""
 machine=""
 server="${BURNFOLIO_SERVER:-https://burnfolio.ai}"
-providers="claude,codex,opencode,pi"
+providers="amp,claude,codebuff,codex,copilot,droid,gemini,goose,hermes,kilo,kimi,openclaw,opencode,pi,qwen"
 schedule=""
 run_sync=1
 
@@ -24,7 +24,7 @@ Options:
                                     If omitted in an interactive shell, the installer can prompt for existing values.
   --schedule <none|hourly|daily>    Configure a cron sync schedule non-interactively.
   --server <url>                    Burnfolio server URL. Defaults to https://burnfolio.ai.
-  --providers <list>                Providers to scan. Defaults to claude,codex,opencode,pi.
+  --providers <list>                Providers to scan. Defaults to all supported sources.
   --install-dir <dir>               Install directory. Defaults to /usr/local/bin or ~/.local/bin.
   --version <tag|latest>            Release tag to install. Defaults to latest.
   --no-run                          Install/configure only; do not run an immediate sync.
