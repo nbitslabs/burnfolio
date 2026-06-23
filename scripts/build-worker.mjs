@@ -13,6 +13,7 @@ const [source, css] = await Promise.all([
 const assetFiles = {
   "logo.svg": { path: "worker/assets/logo.svg", type: "image/svg+xml; charset=utf-8", encoding: "text" },
   "pyro.svg": { path: "worker/assets/pyro.svg", type: "image/svg+xml; charset=utf-8", encoding: "text" },
+  "pyro-gpu.svg": { path: "worker/assets/pyro-gpu.svg", type: "image/svg+xml; charset=utf-8", encoding: "text" },
   "pyro-512.png": { path: "worker/assets/pyro-512.png", type: "image/png", encoding: "base64" },
   "og-landing.png": { path: "worker/assets/og-landing.png", type: "image/png", encoding: "base64" },
 };

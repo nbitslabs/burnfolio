@@ -838,6 +838,7 @@ function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { us
     <main class="landing">
       <section class="hero">
         <div class="hero-copy">
+        <img class="hero-pyro" src="/assets/pyro-gpu.svg" alt="Pyro warming up a GPU" width="156" height="156">
         <p class="eyebrow">Burn graph for AI-native builders</p>
         <h1>Show your burn.</h1>
         <p class="lede">The contribution graph for everything you build with AI. Install <code>pyro</code>, sync token counts, and share a graph worth showing off.</p>
@@ -891,7 +892,7 @@ function authPage(mode = "signup") {
         <p class="eyebrow">${esc(eyebrow)}</p>
         <h1>${esc(heading)}</h1>
         <p class="lede">${esc(body)}</p>
-        <form class="auth-form" data-login data-auth-mode="${isSignup ? "signup" : "signin"}">
+        <form class="auth-form" data-login data-email-action data-resend-label="Resend link" data-auth-mode="${isSignup ? "signup" : "signin"}">
           <label for="auth-email">Email</label>
           <div class="form-row">
             <input id="auth-email" name="email" type="email" placeholder="you@example.com" autocomplete="email" required>
@@ -987,7 +988,7 @@ async function appPage(request, env) {
           <div class="section-head"><div><h2>Profile</h2><p class="muted">${esc(profileHelp)}</p></div></div>
           ${handleControl}
           <div class="email-list">${emails.map(emailRow).join("") || emptyState("No emails linked", "Add an email to use magic links and recover this profile.")}</div>
-          <form class="form-stack" data-email><label for="profile-email">Add another email</label><div class="form-row"><input id="profile-email" name="email" placeholder="you@example.com" autocomplete="email"><button class="secondary">Send verification</button></div></form>
+          <form class="form-stack" data-email data-email-action data-resend-label="Send verification again"><label for="profile-email">Add another email</label><div class="form-row"><input id="profile-email" name="email" placeholder="you@example.com" autocomplete="email"><button class="secondary">Send verification</button></div></form>
           <pre class="result" data-email-result hidden></pre>
         </section>
         <section class="panel">
@@ -1946,48 +1947,116 @@ function signupScript() {
       };
       return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
     }
+    function submitButton(form) {
+      return form.querySelector("button[type='submit'], button:not([type])");
+    }
+    function setBusy(button, label) {
+      if (!button) return "";
+      const original = button.dataset.label || button.textContent;
+      button.dataset.label = original;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = label;
+      return original;
+    }
+    function restoreButton(button, label) {
+      if (!button) return;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = label || button.dataset.label || "Continue";
+    }
+    function startEmailCooldown(form, seconds = 60) {
+      const button = submitButton(form);
+      if (!button) return;
+      const doneLabel = form.dataset.resendLabel || button.dataset.label || "Send again";
+      button.removeAttribute("aria-busy");
+      let remaining = seconds;
+      button.disabled = true;
+      button.textContent = "Resend in " + remaining + "s";
+      const timer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          clearInterval(timer);
+          restoreButton(button, doneLabel);
+          return;
+        }
+        button.textContent = "Resend in " + remaining + "s";
+      }, 1000);
+    }
     document.querySelector("[data-signup]").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
+      const button = submitButton(form);
       const result = document.querySelector("[data-result]");
       const body = Object.fromEntries(new FormData(form).entries());
-      const res = await fetch("/api/signup", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (!res.ok) {
-        result.hidden = false;
-        result.textContent = messageFor(data);
-        return;
+      setBusy(button, "Creating...");
+      result.hidden = false;
+      result.textContent = "Creating your profile...";
+      try {
+        const res = await fetch("/api/signup", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+        const data = await res.json();
+        if (!res.ok) {
+          result.textContent = messageFor(data);
+          restoreButton(button);
+          return;
+        }
+        const profile = data.account.handle || data.account.account_number;
+        const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + profile + " --machine " + data.machine.token;
+        setupResult(result, [
+          { label: "Account number", value: data.account.account_number },
+          { label: "Account key", value: data.account_key },
+          { label: "Machine token", value: data.machine.token },
+          { label: "Install + sync command", value: command }
+        ], "Save the account key now. It is the private credential for anonymous sign-in.");
+      } catch {
+        result.textContent = "Something went wrong. Check the inputs and try again.";
+        restoreButton(button);
       }
-      const profile = data.account.handle || data.account.account_number;
-      const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + profile + " --machine " + data.machine.token;
-      setupResult(result, [
-        { label: "Account number", value: data.account.account_number },
-        { label: "Account key", value: data.account_key },
-        { label: "Machine token", value: data.machine.token },
-        { label: "Install + sync command", value: command }
-      ], "Save the account key now. It is the private credential for anonymous sign-in.");
     });
     document.querySelector("[data-login]").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
+      const button = submitButton(form);
       const result = document.querySelector("[data-login-result]");
       const body = Object.fromEntries(new FormData(form).entries());
-      const res = await fetch("/api/magic-links", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
-      const data = await res.json();
+      setBusy(button, "Sending...");
       result.hidden = false;
-      const mode = form.dataset.authMode || "signin";
-      result.textContent = res.ok ? (mode === "signup" ? "Magic link sent. Check your email to finish creating your profile." : "Magic link sent. Check your email to sign in.") : messageFor(data);
+      result.textContent = "Sending your magic link...";
+      try {
+        const res = await fetch("/api/magic-links", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+        const data = await res.json();
+        const mode = form.dataset.authMode || "signin";
+        if (res.ok) {
+          result.textContent = mode === "signup" ? "Magic link sent. Check your email to finish creating your profile." : "Magic link sent. Check your email to sign in.";
+          startEmailCooldown(form);
+          return;
+        }
+        result.textContent = messageFor(data);
+        restoreButton(button);
+      } catch {
+        result.textContent = "The email could not be sent. Try again shortly.";
+        restoreButton(button);
+      }
     });
     document.querySelector("[data-account-login]").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
+      const button = submitButton(form);
       const result = document.querySelector("[data-account-login-result]");
       const body = Object.fromEntries(new FormData(form).entries());
-      const res = await fetch("/api/account-login", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
-      const data = await res.json();
+      setBusy(button, "Signing in...");
       result.hidden = false;
-      result.textContent = res.ok ? "Signed in. Opening dashboard..." : messageFor(data);
-      if (res.ok) location.href = "/app";
+      result.textContent = "Checking your account key...";
+      try {
+        const res = await fetch("/api/account-login", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+        const data = await res.json();
+        result.textContent = res.ok ? "Signed in. Opening dashboard..." : messageFor(data);
+        if (res.ok) location.href = "/app";
+        else restoreButton(button);
+      } catch {
+        result.textContent = "Something went wrong. Check the inputs and try again.";
+        restoreButton(button);
+      }
     });
   `;
 }
@@ -2052,6 +2121,42 @@ function dashboardScript(profileRef) {
       };
       return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
     }
+    function submitButton(form) {
+      return form.querySelector("button[type='submit'], button:not([type])");
+    }
+    function setBusy(button, label) {
+      if (!button) return "";
+      const original = button.dataset.label || button.textContent;
+      button.dataset.label = original;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = label;
+      return original;
+    }
+    function restoreButton(button, label) {
+      if (!button) return;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = label || button.dataset.label || "Continue";
+    }
+    function startEmailCooldown(form, seconds = 60) {
+      const button = submitButton(form);
+      if (!button) return;
+      const doneLabel = form.dataset.resendLabel || button.dataset.label || "Send again";
+      button.removeAttribute("aria-busy");
+      let remaining = seconds;
+      button.disabled = true;
+      button.textContent = "Resend in " + remaining + "s";
+      const timer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          clearInterval(timer);
+          restoreButton(button, doneLabel);
+          return;
+        }
+        button.textContent = "Resend in " + remaining + "s";
+      }, 1000);
+    }
     async function post(form, url) {
       const body = Object.fromEntries(new FormData(form).entries());
       const res = await fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
@@ -2067,7 +2172,23 @@ function dashboardScript(profileRef) {
       }
       setTimeout(() => button.textContent = button.dataset.label || "Copy", 1200);
     }
-    document.querySelector("[data-machine]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/machines"); const out = document.querySelector("[data-machine-result]"); ok && data.machine ? machineResult(out, data.machine) : (out.hidden = false, out.textContent = messageFor(data)); });
+    document.querySelector("[data-machine]").addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const button = submitButton(form);
+      const out = document.querySelector("[data-machine-result]");
+      setBusy(button, "Creating...");
+      out.hidden = false;
+      out.textContent = "Creating machine token...";
+      try {
+        const { ok, data } = await post(form, "/api/machines");
+        ok && data.machine ? machineResult(out, data.machine) : (out.textContent = messageFor(data));
+      } catch {
+        out.textContent = "Something went wrong. Check the inputs and try again.";
+      } finally {
+        restoreButton(button);
+      }
+    });
     document.querySelectorAll("[data-refresh-machine]").forEach(button => {
       button.dataset.label = button.textContent;
       button.addEventListener("click", async () => {
@@ -2099,10 +2220,65 @@ function dashboardScript(profileRef) {
         }
       });
     });
-    document.querySelector("[data-handle]")?.addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/handles"); ok ? location.reload() : alert(messageFor(data)); });
-    document.querySelector("[data-email]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/email"); const out = document.querySelector("[data-email-result]"); out.hidden = false; out.textContent = ok ? "Verification link sent. This email will show as pending until the link is opened." : messageFor(data); });
-    document.querySelector("[data-org]").addEventListener("submit", async e => { e.preventDefault(); const { ok, data } = await post(e.currentTarget, "/api/orgs"); const out = document.querySelector("[data-org-result]"); ok && data.org ? location.reload() : (out.hidden = false, out.textContent = messageFor(data)); });
-    document.querySelector("[data-logout]").addEventListener("click", async () => { await fetch("/api/logout", { method:"POST" }); location.href = "/"; });
+    document.querySelector("[data-handle]")?.addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const button = submitButton(form);
+      setBusy(button, "Saving...");
+      try {
+        const { ok, data } = await post(form, "/api/handles");
+        ok ? location.reload() : alert(messageFor(data));
+        if (!ok) restoreButton(button);
+      } catch {
+        alert("Something went wrong. Check the inputs and try again.");
+        restoreButton(button);
+      }
+    });
+    document.querySelector("[data-email]").addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const button = submitButton(form);
+      const out = document.querySelector("[data-email-result]");
+      setBusy(button, "Sending...");
+      out.hidden = false;
+      out.textContent = "Sending verification link...";
+      try {
+        const { ok, data } = await post(form, "/api/email");
+        if (ok) {
+          out.textContent = "Verification link sent. This email will show as pending until the link is opened.";
+          startEmailCooldown(form);
+          return;
+        }
+        out.textContent = messageFor(data);
+        restoreButton(button);
+      } catch {
+        out.textContent = "The email could not be sent. Try again shortly.";
+        restoreButton(button);
+      }
+    });
+    document.querySelector("[data-org]").addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const button = submitButton(form);
+      const out = document.querySelector("[data-org-result]");
+      setBusy(button, "Creating...");
+      out.hidden = false;
+      out.textContent = "Creating organization...";
+      try {
+        const { ok, data } = await post(form, "/api/orgs");
+        ok && data.org ? location.reload() : (out.textContent = messageFor(data));
+        if (!ok) restoreButton(button);
+      } catch {
+        out.textContent = "Something went wrong. Check the inputs and try again.";
+        restoreButton(button);
+      }
+    });
+    document.querySelector("[data-logout]").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      setBusy(button, "Logging out...");
+      await fetch("/api/logout", { method:"POST" });
+      location.href = "/";
+    });
   `;
 }
 
@@ -2131,22 +2307,70 @@ function orgManagementScript() {
       const data = await res.json().catch(() => ({}));
       return { ok: res.ok, data };
     }
+    function submitButton(form) {
+      return form.querySelector("button[type='submit'], button:not([type])");
+    }
+    function setBusy(control, label) {
+      if (!control) return "";
+      const original = control.dataset.label || control.textContent || control.value;
+      control.dataset.label = original;
+      control.disabled = true;
+      control.setAttribute("aria-busy", "true");
+      if ("value" in control && control.tagName === "INPUT") control.value = label;
+      else control.textContent = label;
+      return original;
+    }
+    function restoreControl(control, label) {
+      if (!control) return;
+      control.disabled = false;
+      control.removeAttribute("aria-busy");
+      const next = label || control.dataset.label || "Continue";
+      if ("value" in control && control.tagName === "INPUT") control.value = next;
+      else control.textContent = next;
+    }
     document.querySelectorAll("[data-add-member]").forEach(form => form.addEventListener("submit", async event => {
       event.preventDefault();
+      const button = submitButton(form);
       const body = Object.fromEntries(new FormData(form).entries());
-      const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/members", "POST", body);
-      ok ? location.reload() : alert(messageFor(data));
+      setBusy(button, "Adding...");
+      try {
+        const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/members", "POST", body);
+        ok ? location.reload() : alert(messageFor(data));
+        if (!ok) restoreControl(button);
+      } catch {
+        alert("Something went wrong. Check the inputs and try again.");
+        restoreControl(button);
+      }
     }));
     document.querySelectorAll("[data-member-role] select").forEach(select => select.addEventListener("change", async event => {
       const form = event.target.closest("[data-member-role]");
       const body = Object.fromEntries(new FormData(form).entries());
-      const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/members/" + encodeURIComponent(form.dataset.member), "PATCH", body);
-      ok ? location.reload() : alert(messageFor(data));
+      select.disabled = true;
+      select.setAttribute("aria-busy", "true");
+      try {
+        const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/members/" + encodeURIComponent(form.dataset.member), "PATCH", body);
+        ok ? location.reload() : alert(messageFor(data));
+        if (!ok) {
+          select.disabled = false;
+          select.removeAttribute("aria-busy");
+        }
+      } catch {
+        alert("Something went wrong. Check the inputs and try again.");
+        select.disabled = false;
+        select.removeAttribute("aria-busy");
+      }
     }));
     document.querySelectorAll("[data-remove-member]").forEach(button => button.addEventListener("click", async () => {
       if (!confirm("Remove this member from the organization?")) return;
-      const { ok, data } = await send("/api/orgs/" + encodeURIComponent(button.dataset.org) + "/members/" + encodeURIComponent(button.dataset.member), "DELETE");
-      ok ? location.reload() : alert(messageFor(data));
+      setBusy(button, "Removing...");
+      try {
+        const { ok, data } = await send("/api/orgs/" + encodeURIComponent(button.dataset.org) + "/members/" + encodeURIComponent(button.dataset.member), "DELETE");
+        ok ? location.reload() : alert(messageFor(data));
+        if (!ok) restoreControl(button);
+      } catch {
+        alert("Something went wrong. Check the inputs and try again.");
+        restoreControl(button);
+      }
     }));
   `;
 }
@@ -2496,7 +2720,7 @@ async function sendMagicEmail(env, to, link) {
 }
 
 function magicEmailText(link) {
-  return `Sign in to Burnfolio\n\nUse this link to open your burn graph dashboard. It expires in 15 minutes.\n\n${link}\n\nIf you did not request this email, you can ignore it.`;
+  return `Open your Burnfolio graph\n\nUse this magic link to open your burn graph dashboard. It expires in 15 minutes.\n\n${link}\n\nIf you did not request this email, you can ignore it.`;
 }
 
 function magicEmailHtml(link) {
@@ -2510,9 +2734,18 @@ function magicEmailHtml(link) {
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;border:1px solid #EEDDCB;border-radius:18px;background:#FFFCF7;overflow:hidden">
             <tr>
               <td style="padding:28px 28px 10px;border-top:4px solid #F2611C">
-                <div style="font-size:18px;font-weight:800;color:#211405">Burnfolio</div>
-                <h1 style="margin:28px 0 10px;font-size:30px;line-height:1.08;color:#211405;font-family:Bricolage Grotesque,Segoe UI,Arial,sans-serif">Open your burn graph</h1>
-                <p style="margin:0;color:#6F5F4D;font-size:15px;line-height:1.55">This magic link signs you in to Burnfolio and expires in 15 minutes.</p>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="vertical-align:top">
+                      <div style="font-size:18px;font-weight:800;color:#211405">Burnfolio</div>
+                      <h1 style="margin:28px 0 10px;font-size:30px;line-height:1.08;color:#211405;font-family:Bricolage Grotesque,Segoe UI,Arial,sans-serif">Open your burn graph</h1>
+                      <p style="margin:0;color:#6F5F4D;font-size:15px;line-height:1.55">Pyro has the GPU warm. This magic link signs you in and expires in 15 minutes.</p>
+                    </td>
+                    <td align="right" style="vertical-align:top;width:118px;padding-left:18px">
+                      <img src="https://burnfolio.ai/assets/pyro-gpu.svg" width="104" height="104" alt="Pyro warming up a GPU" style="display:block;width:104px;height:104px;border:0">
+                    </td>
+                  </tr>
+                </table>
               </td>
             </tr>
             <tr>

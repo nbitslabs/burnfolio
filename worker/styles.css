@@ -161,6 +161,16 @@ button:hover,
 .button:hover {
   background: var(--burnfolio-flame-deep-h);
 }
+button:disabled,
+button[aria-busy="true"] {
+  cursor: wait;
+  opacity: .68;
+  box-shadow: none;
+}
+button:disabled:hover,
+button[aria-busy="true"]:hover {
+  background: var(--burnfolio-flame-deep);
+}
 .secondary {
   background: var(--burnfolio-linen);
   color: var(--burnfolio-ink);
@@ -169,6 +179,12 @@ button:hover,
 }
 .secondary:hover {
   background: var(--burnfolio-wash);
+}
+.secondary:disabled,
+.secondary:disabled:hover,
+.secondary[aria-busy="true"],
+.secondary[aria-busy="true"]:hover {
+  background: var(--burnfolio-linen);
 }
 input,
 select {
@@ -260,6 +276,12 @@ pre code {
   padding: 54px 32px 44px;
 }
 .hero-copy { min-width: 0; }
+.hero-pyro {
+  display: block;
+  width: clamp(96px, 12vw, 156px);
+  height: auto;
+  margin: 0 0 8px -8px;
+}
 .eyebrow {
   color: var(--burnfolio-ember);
   text-transform: uppercase;
