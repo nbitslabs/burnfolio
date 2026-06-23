@@ -14,22 +14,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nbitslabs/burnfolio/internal/openrouter"
 	"github.com/nbitslabs/burnfolio/internal/usage"
 )
 
 var version = "dev"
 
 type config struct {
-	Profile         string `json:"profile,omitempty"`
-	Machine         string `json:"machine,omitempty"`
-	Server          string `json:"server,omitempty"`
-	Providers       string `json:"providers,omitempty"`
-	InstallDir      string `json:"install_dir,omitempty"`
-	Installed       bool   `json:"installed"`
-	UninstalledAt   string `json:"uninstalled_at,omitempty"`
-	LastSyncAt      string `json:"last_sync_at,omitempty"`
-	LastSyncStatus  string `json:"last_sync_status,omitempty"`
-	LastPyroVersion string `json:"last_pyro_version,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	Machine           string `json:"machine,omitempty"`
+	Server            string `json:"server,omitempty"`
+	Providers         string `json:"providers,omitempty"`
+	InstallDir        string `json:"install_dir,omitempty"`
+	Installed         bool   `json:"installed"`
+	UninstalledAt     string `json:"uninstalled_at,omitempty"`
+	LastSyncAt        string `json:"last_sync_at,omitempty"`
+	LastSyncStatus    string `json:"last_sync_status,omitempty"`
+	LastPyroVersion   string `json:"last_pyro_version,omitempty"`
+	OpenRouterKey     string `json:"openrouter_key,omitempty"`
+	OpenRouterProfile string `json:"openrouter_profile,omitempty"`
+	OpenRouterSince   string `json:"openrouter_since,omitempty"`
 }
 
 func main() {
@@ -62,13 +66,16 @@ func main() {
 	}
 
 	var (
-		home       string
-		providers  string
-		jsonOutput bool
-		profile    string
-		machine    string
-		server     string
-		noSync     bool
+		home              string
+		providers         string
+		jsonOutput        bool
+		profile           string
+		machine           string
+		server            string
+		noSync            bool
+		openRouterKey     string
+		openRouterProfile string
+		openRouterSince   string
 	)
 
 	defaultHome, err := os.UserHomeDir()
@@ -83,6 +90,9 @@ func main() {
 	flag.StringVar(&profile, "profile", "", "Burnfolio account number or username to sync to")
 	flag.StringVar(&machine, "machine", "", "Burnfolio machine token for sync")
 	flag.StringVar(&server, "server", defaultServer(), "Burnfolio server URL")
+	flag.StringVar(&openRouterKey, "openrouter-key", "", "OpenRouter management key for local usage import")
+	flag.StringVar(&openRouterProfile, "openrouter-profile", "", "Burnfolio profile or org for OpenRouter usage")
+	flag.StringVar(&openRouterSince, "openrouter-since", "", "first OpenRouter usage date to import, YYYY-MM-DD")
 	flag.BoolVar(&noSync, "no-sync", false, "collect and print only; do not sync even when configured")
 	flag.BoolVar(&noSync, "no-run", false, "alias for -no-sync")
 	flag.Parse()
@@ -104,6 +114,15 @@ func main() {
 	}
 	if server == defaultServer() && cfg.Server != "" {
 		server = cfg.Server
+	}
+	if openRouterKey == "" {
+		openRouterKey = cfg.OpenRouterKey
+	}
+	if openRouterProfile == "" {
+		openRouterProfile = valueOr(cfg.OpenRouterProfile, profile)
+	}
+	if openRouterSince == "" {
+		openRouterSince = valueOr(cfg.OpenRouterSince, "2020-01-01")
 	}
 
 	selected := usage.ParseProviderList(providers)
@@ -158,6 +177,21 @@ func main() {
 		} else {
 			fmt.Printf("\nSynced %d days to %s for %s.\n", result.UpsertedDays, strings.TrimRight(server, "/"), profile)
 		}
+		if strings.TrimSpace(openRouterKey) != "" {
+			orResult, err := syncOpenRouterUsage(context.Background(), server, openRouterProfile, machine, openRouterKey, openRouterSince)
+			if err != nil {
+				cfg.LastSyncStatus = "failed openrouter: " + err.Error()
+				_ = saveConfig(defaultHome, cfg)
+				fmt.Fprintf(os.Stderr, "openrouter sync failed: %v\n", err)
+				os.Exit(1)
+			}
+			cfg.OpenRouterKey = strings.TrimSpace(openRouterKey)
+			cfg.OpenRouterProfile = strings.TrimSpace(openRouterProfile)
+			cfg.OpenRouterSince = strings.TrimSpace(openRouterSince)
+			cfg.LastSyncStatus += fmt.Sprintf("; openrouter: %d days", orResult.UpsertedDays)
+			_ = saveConfig(defaultHome, cfg)
+			fmt.Printf("Synced %d OpenRouter days to %s for %s.\n", orResult.UpsertedDays, strings.TrimRight(server, "/"), openRouterProfile)
+		}
 	}
 
 	if len(report.Warnings) > 0 {
@@ -173,6 +207,12 @@ type syncPayload struct {
 	Profile     string          `json:"profile"`
 	PyroVersion string          `json:"pyro_version"`
 	Days        []usage.SyncDay `json:"days"`
+}
+
+type openRouterPayload struct {
+	Profile           string           `json:"profile"`
+	OpenRouterKeyHash string           `json:"openrouter_key_hash"`
+	Days              []openrouter.Day `json:"days"`
 }
 
 type syncResult struct {
@@ -234,6 +274,55 @@ func syncReport(ctx context.Context, server string, profile string, machineToken
 	return result, nil
 }
 
+func syncOpenRouterUsage(ctx context.Context, server string, profile string, machineToken string, key string, since string) (syncResult, error) {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return syncResult{}, fmt.Errorf("openrouter profile is required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	days, err := openrouter.Client{Key: key}.DailyUsage(ctx, since, time.Now().UTC())
+	if err != nil {
+		return syncResult{}, err
+	}
+	payload := openRouterPayload{
+		Profile:           profile,
+		OpenRouterKeyHash: openrouter.KeyHash(key),
+		Days:              days,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return syncResult{}, err
+	}
+	endpoint := strings.TrimRight(server, "/") + "/api/openrouter/ingest"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return syncResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+machineToken)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return syncResult{}, err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return syncResult{}, err
+	}
+	var result syncResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return syncResult{}, fmt.Errorf("unexpected response from %s: %s", endpoint, strings.TrimSpace(string(body)))
+	}
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		if result.Error == "" {
+			result.Error = res.Status
+		}
+		return result, fmt.Errorf("%s", result.Error)
+	}
+	return result, nil
+}
+
 func installCmd(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -243,6 +332,9 @@ func installCmd(args []string) error {
 	machine := fs.String("machine", cfg.Machine, "Burnfolio machine token")
 	server := fs.String("server", valueOr(cfg.Server, defaultServer()), "Burnfolio server URL")
 	providers := fs.String("providers", valueOr(cfg.Providers, usage.DefaultProviderList()), "providers to scan")
+	openRouterKey := fs.String("openrouter-key", cfg.OpenRouterKey, "OpenRouter management key")
+	openRouterProfile := fs.String("openrouter-profile", cfg.OpenRouterProfile, "Burnfolio profile or org for OpenRouter usage")
+	openRouterSince := fs.String("openrouter-since", valueOr(cfg.OpenRouterSince, "2020-01-01"), "first OpenRouter usage date")
 	installDir := fs.String("install-dir", cfg.InstallDir, "install directory")
 	schedule := fs.String("schedule", "", "recorded schedule")
 	if err := fs.Parse(args); err != nil {
@@ -252,6 +344,9 @@ func installCmd(args []string) error {
 	cfg.Machine = strings.TrimSpace(*machine)
 	cfg.Server = strings.TrimRight(strings.TrimSpace(*server), "/")
 	cfg.Providers = strings.TrimSpace(*providers)
+	cfg.OpenRouterKey = strings.TrimSpace(*openRouterKey)
+	cfg.OpenRouterProfile = strings.TrimSpace(*openRouterProfile)
+	cfg.OpenRouterSince = strings.TrimSpace(*openRouterSince)
 	cfg.InstallDir = strings.TrimSpace(*installDir)
 	cfg.Installed = true
 	cfg.UninstalledAt = ""
@@ -316,6 +411,9 @@ func statusCmd(args []string) error {
 	fmt.Printf("machine: %s\n", masked(cfg.Machine))
 	fmt.Printf("server: %s\n", valueOr(cfg.Server, defaultServer()))
 	fmt.Printf("providers: %s\n", valueOr(cfg.Providers, usage.DefaultProviderList()))
+	fmt.Printf("openrouter_key: %s\n", masked(cfg.OpenRouterKey))
+	fmt.Printf("openrouter_profile: %s\n", valueOr(cfg.OpenRouterProfile, "(not configured)"))
+	fmt.Printf("openrouter_since: %s\n", valueOr(cfg.OpenRouterSince, "2020-01-01"))
 	if cfg.LastSyncAt != "" {
 		fmt.Printf("last_sync: %s %s\n", cfg.LastSyncAt, cfg.LastSyncStatus)
 	}

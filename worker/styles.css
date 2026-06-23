@@ -1084,6 +1084,28 @@ body.share-open {
   border-radius: var(--burnfolio-r-m);
   background: var(--burnfolio-wash);
 }
+.integration-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--burnfolio-line);
+  border-radius: var(--burnfolio-r-m);
+  background: var(--burnfolio-linen);
+}
+.section-head.compact {
+  margin-bottom: 0;
+}
+.section-head.compact h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+}
+.integration-list {
+  gap: 8px;
+}
+.integration-row {
+  background: var(--burnfolio-wash);
+}
 .profile-field {
   display: grid;
   gap: 6px;

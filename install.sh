@@ -8,6 +8,9 @@ profile=""
 machine=""
 server="${BURNFOLIO_SERVER:-https://burnfolio.ai}"
 providers="amp,claude,codebuff,codex,copilot,droid,gemini,goose,hermes,kilo,kimi,openclaw,opencode,pi,qwen"
+openrouter_key=""
+openrouter_profile=""
+openrouter_since="2020-01-01"
 schedule=""
 run_sync=1
 
@@ -25,6 +28,9 @@ Options:
   --schedule <none|hourly|daily>    Configure a cron sync schedule non-interactively.
   --server <url>                    Burnfolio server URL. Defaults to https://burnfolio.ai.
   --providers <list>                Providers to scan. Defaults to all supported sources.
+  --openrouter-key <key>            OpenRouter management key for local usage import.
+  --openrouter-profile <profile>    Burnfolio profile or org for OpenRouter usage. Defaults to --profile.
+  --openrouter-since <date>         First OpenRouter usage date to import. Defaults to 2020-01-01.
   --install-dir <dir>               Install directory. Defaults to /usr/local/bin or ~/.local/bin.
   --version <tag|latest>            Release tag to install. Defaults to latest.
   --no-run                          Install/configure only; do not run an immediate sync.
@@ -63,6 +69,18 @@ while [ "$#" -gt 0 ]; do
       providers="${2:-}"; shift 2 ;;
     --providers=*)
       providers="${1#*=}"; shift ;;
+    --openrouter-key)
+      openrouter_key="${2:-}"; shift 2 ;;
+    --openrouter-key=*)
+      openrouter_key="${1#*=}"; shift ;;
+    --openrouter-profile)
+      openrouter_profile="${2:-}"; shift 2 ;;
+    --openrouter-profile=*)
+      openrouter_profile="${1#*=}"; shift ;;
+    --openrouter-since)
+      openrouter_since="${2:-}"; shift 2 ;;
+    --openrouter-since=*)
+      openrouter_since="${1#*=}"; shift ;;
     --install-dir)
       install_dir="${2:-}"; shift 2 ;;
     --install-dir=*)
@@ -93,6 +111,9 @@ if [ -z "$profile" ] && [ -n "$machine" ] && [ ! -r /dev/tty ]; then
 fi
 if [ -z "$profile" ] && [ -n "$schedule" ] && [ "$schedule" != "none" ]; then
   die "--schedule requires --profile and --machine"
+fi
+if [ -n "$openrouter_key" ] && [ -z "$profile" ] && [ ! -r /dev/tty ]; then
+  die "--openrouter-key requires --profile and --machine"
 fi
 
 need curl
@@ -234,6 +255,9 @@ fi
 if [ -z "$profile" ] || [ -z "$machine" ]; then
   prompt_existing_token
 fi
+if [ -n "$openrouter_key" ] && [ -z "$openrouter_profile" ]; then
+  openrouter_profile="$profile"
+fi
 
 if [ -n "$profile" ] && [ -z "$schedule" ]; then
   schedule="$(prompt_schedule)"
@@ -243,6 +267,9 @@ install_args=(install --providers "$providers" --server "$server" --install-dir 
 if [ -n "$profile" ]; then
   install_args+=(--profile "$profile" --machine "$machine")
 fi
+if [ -n "$openrouter_key" ]; then
+  install_args+=(--openrouter-key "$openrouter_key" --openrouter-profile "$openrouter_profile" --openrouter-since "$openrouter_since")
+fi
 if [ -n "$schedule" ]; then
   install_args+=(--schedule "$schedule")
 fi
@@ -251,7 +278,11 @@ fi
 if [ "$run_sync" = "1" ]; then
   echo "Running initial sync..."
   if [ -n "$profile" ]; then
-    "$pyro_path" --providers "$providers" --server "$server" --profile "$profile" --machine "$machine"
+    sync_args=(--providers "$providers" --server "$server" --profile "$profile" --machine "$machine")
+    if [ -n "$openrouter_key" ]; then
+      sync_args+=(--openrouter-key "$openrouter_key" --openrouter-profile "$openrouter_profile" --openrouter-since "$openrouter_since")
+    fi
+    "$pyro_path" "${sync_args[@]}"
   else
     "$pyro_path"
   fi

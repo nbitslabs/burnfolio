@@ -5,6 +5,9 @@ const MAX_SYNC_DAYS = 3000;
 const MAX_TOKEN_FIELD = 1_000_000_000_000;
 const MAX_RECORDS_PER_DAY = 1_000_000;
 const MIN_INGEST_DATE = "2020-01-01";
+const OPENROUTER_ANALYTICS_URL = "https://openrouter.ai/api/v1/analytics/query";
+const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
+const OPENROUTER_SYNC_SINCE = "2020-01-01";
 const RESERVED_HANDLES = new Set([
   "app",
   "signup",
@@ -49,6 +52,9 @@ export default {
       return json({ error: "internal_error" }, 500);
     }
   },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(syncDueOpenRouterConnections(env));
+  },
 };
 
 async function route(request, env) {
@@ -81,10 +87,17 @@ async function route(request, env) {
   if (path === "/api/global/stats" && (request.method === "GET" || request.method === "HEAD")) return globalStatsResponse(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/profile" && request.method === "PATCH") return updateUserProfileRoute(request, env);
+  if (path === "/api/openrouter/ingest" && request.method === "POST") return ingestOpenRouter(request, env);
+  if (path === "/api/openrouter/connections" && request.method === "POST") return connectOpenRouterRoute(request, env);
+  if (path.match(/^\/api\/openrouter\/connections\/[^/]+$/) && request.method === "DELETE") return deleteOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[4]));
+  if (path.match(/^\/api\/openrouter\/connections\/[^/]+\/sync$/) && request.method === "POST") return syncOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[4]));
   if (path === "/api/machines" && request.method === "POST") return createMachineRoute(request, env);
   if (path.match(/^\/api\/machines\/[^/]+\/token$/) && request.method === "POST") return rotateMachineTokenRoute(request, env, decodeURIComponent(path.split("/")[3]));
   if (path === "/api/orgs" && request.method === "POST") return createOrgRoute(request, env);
   if (path.match(/^\/api\/orgs\/[^/]+\/profile$/) && request.method === "PATCH") return updateOrgProfileRoute(request, env, path.split("/")[3]);
+  if (path.match(/^\/api\/orgs\/[^/]+\/openrouter\/connections$/) && request.method === "POST") return connectOpenRouterRoute(request, env, path.split("/")[3]);
+  if (path.match(/^\/api\/orgs\/[^/]+\/openrouter\/connections\/[^/]+$/) && request.method === "DELETE") return deleteOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[6]), path.split("/")[3]);
+  if (path.match(/^\/api\/orgs\/[^/]+\/openrouter\/connections\/[^/]+\/sync$/) && request.method === "POST") return syncOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[6]), path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/members$/) && request.method === "POST") return addOrgMemberRoute(request, env, path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "PATCH") return updateOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "DELETE") return removeOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
@@ -580,6 +593,345 @@ async function ingest(request, env) {
   return json({ ok: true, upserted_days: statements.length, skipped_days: skippedDays });
 }
 
+async function ingestOpenRouter(request, env) {
+  const token = bearerToken(request);
+  if (!token) return json({ error: "missing_machine_token" }, 401);
+  const tokenHash = await sha256(token);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("openrouter-ingest:ip", clientIP(request)), 120, 60],
+    [`openrouter-ingest:token:${tokenHash.slice(0, 32)}`, 120, 60],
+  ]);
+  if (limited) return limited;
+  const machine = await env.DB.prepare("SELECT id, user_id, org_id FROM machines WHERE token_hash = ?").bind(tokenHash).first();
+  if (!machine) return json({ error: "invalid_machine_token" }, 401);
+  const body = await readBody(request);
+  const account = await resolveAccount(env, String(body.profile || ""));
+  if (!account || !(await canUploadOpenRouterToAccount(env, machine.user_id, account))) return json({ error: "profile_machine_mismatch" }, 403);
+  const sourceHash = cleanOpenRouterHash(body.openrouter_key_hash || body.source_hash);
+  if (!sourceHash) return json({ error: "invalid_openrouter_source" }, 400);
+  const result = await upsertOpenRouterDays(env, {
+    accountID: account.id,
+    keyHash: sourceHash,
+    days: Array.isArray(body.days) ? body.days : [],
+    source: "pyro",
+    machineID: machine.id,
+  });
+  if (result.error) return json({ error: result.error }, result.status || 400);
+  await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(machine.id).run();
+  return json({ ok: true, upserted_days: result.upsertedDays, skipped_days: result.skippedDays });
+}
+
+async function canUploadOpenRouterToAccount(env, userID, account) {
+  if (account.kind === "user") return account.id === userID;
+  if (account.kind !== "org") return false;
+  return Boolean(await membershipRole(env, account.id, userID));
+}
+
+async function connectOpenRouterRoute(request, env, orgRef = "") {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("openrouter-connect:user", user.id), 20, 3600],
+  ]);
+  if (limited) return limited;
+  const target = await openRouterTargetAccount(env, user.id, orgRef);
+  if (target.error) return json({ error: target.error }, target.status || 400);
+  const body = await readBody(request);
+  const key = cleanOpenRouterKey(body.key || body.openrouter_key);
+  if (!key) return json({ error: "invalid_openrouter_key" }, 400);
+  const details = await validateOpenRouterKey(key);
+  if (details.error) return json({ error: details.error }, details.status || 400);
+  const encrypted = await encryptStoredSecret(env, key);
+  if (encrypted.error) return json({ error: encrypted.error }, 500);
+  const keyHash = await sha256(key);
+  const id = crypto.randomUUID();
+  await env.DB.prepare(`
+    INSERT INTO openrouter_connections
+      (id, account_id, owner_user_id, openrouter_key_hash, key_ciphertext, key_nonce, label, status, last_error, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    ON CONFLICT(account_id, openrouter_key_hash) DO UPDATE SET
+      owner_user_id = excluded.owner_user_id,
+      key_ciphertext = excluded.key_ciphertext,
+      key_nonce = excluded.key_nonce,
+      label = excluded.label,
+      status = 'active',
+      last_error = NULL,
+      updated_at = excluded.updated_at
+  `).bind(id, target.account.id, user.id, keyHash, encrypted.ciphertext, encrypted.nonce, details.label || "OpenRouter").run();
+  const connection = await openRouterConnectionForKey(env, target.account.id, keyHash);
+  const sync = await syncOpenRouterConnection(env, connection, { full: true });
+  return json({ connection: publicOpenRouterConnection(connection, sync) });
+}
+
+async function deleteOpenRouterConnectionRoute(request, env, connectionID, orgRef = "") {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const connection = await openRouterConnectionByID(env, connectionID);
+  if (!connection) return json({ error: "openrouter_not_found" }, 404);
+  const allowed = await canManageOpenRouterConnection(env, user.id, connection, orgRef);
+  if (allowed.error) return json({ error: allowed.error }, allowed.status || 403);
+  await env.DB.prepare("DELETE FROM openrouter_connections WHERE id = ?").bind(connection.id).run();
+  return json({ ok: true });
+}
+
+async function syncOpenRouterConnectionRoute(request, env, connectionID, orgRef = "") {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const connection = await openRouterConnectionByID(env, connectionID);
+  if (!connection) return json({ error: "openrouter_not_found" }, 404);
+  const allowed = await canManageOpenRouterConnection(env, user.id, connection, orgRef);
+  if (allowed.error) return json({ error: allowed.error }, allowed.status || 403);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("openrouter-sync:user", user.id), 30, 3600],
+    [await rateKey("openrouter-sync:connection", connection.id), 10, 3600],
+  ]);
+  if (limited) return limited;
+  const sync = await syncOpenRouterConnection(env, connection, { full: false });
+  return json({ connection: publicOpenRouterConnection(connection, sync), sync });
+}
+
+async function openRouterTargetAccount(env, userID, orgRef = "") {
+  if (!orgRef) return { account: await accountView(env, userID) };
+  const org = await resolveAccount(env, orgRef);
+  if (!org || org.kind !== "org") return { error: "org_not_found", status: 404 };
+  const role = await membershipRole(env, org.id, userID);
+  if (!canManageOrg(role)) return { error: "forbidden", status: 403 };
+  return { account: org };
+}
+
+async function canManageOpenRouterConnection(env, userID, connection, orgRef = "") {
+  if (orgRef) {
+    const org = await resolveAccount(env, orgRef);
+    if (!org || org.id !== connection.account_id || org.kind !== "org") return { error: "org_not_found", status: 404 };
+    const role = await membershipRole(env, org.id, userID);
+    return canManageOrg(role) ? {} : { error: "forbidden", status: 403 };
+  }
+  const account = await accountView(env, connection.account_id);
+  if (!account) return { error: "openrouter_not_found", status: 404 };
+  if (account.kind === "user") return account.id === userID ? {} : { error: "forbidden", status: 403 };
+  const role = await membershipRole(env, account.id, userID);
+  return canManageOrg(role) ? {} : { error: "forbidden", status: 403 };
+}
+
+async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, machineID = null }) {
+  if (days.length > MAX_SYNC_DAYS) return { error: "too_many_days", status: 400 };
+  const statements = [];
+  let skippedDays = 0;
+  for (const day of days) {
+    const date = String(day.date_utc || day.date || "");
+    if (!validIngestDate(date)) {
+      skippedDays++;
+      continue;
+    }
+    const usage = day.usage || {};
+    const input = boundedInt(usage.input ?? usage.tokens_prompt, MAX_TOKEN_FIELD);
+    const cacheRead = boundedInt(usage.cache_read ?? usage.cached_tokens, MAX_TOKEN_FIELD);
+    const cacheWrite = boundedInt(usage.cache_write, MAX_TOKEN_FIELD);
+    const output = boundedInt(usage.output ?? usage.tokens_completion, MAX_TOKEN_FIELD);
+    const reasoning = boundedInt(usage.reasoning ?? usage.reasoning_tokens, MAX_TOKEN_FIELD);
+    const explicitTotal = usage.total ?? usage.tokens_total ?? day.total_tokens;
+    const total = explicitTotal !== undefined && explicitTotal !== null && explicitTotal !== ""
+      ? boundedInt(explicitTotal, MAX_TOKEN_FIELD)
+      : boundedInt(input + output + reasoning, MAX_TOKEN_FIELD);
+    const records = boundedInt(day.records ?? day.request_count, MAX_RECORDS_PER_DAY);
+    if ([input, cacheRead, cacheWrite, output, reasoning, total, records].some((value) => value === null)) {
+      skippedDays++;
+      continue;
+    }
+    statements.push(env.DB.prepare(`
+      INSERT INTO openrouter_daily_usage
+        (account_id, openrouter_key_hash, date_utc, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, records, source, updated_by_machine_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      ON CONFLICT(account_id, openrouter_key_hash, date_utc) DO UPDATE SET
+        input_tokens = excluded.input_tokens,
+        cache_read_tokens = excluded.cache_read_tokens,
+        cache_write_tokens = excluded.cache_write_tokens,
+        output_tokens = excluded.output_tokens,
+        reasoning_tokens = excluded.reasoning_tokens,
+        total_tokens = excluded.total_tokens,
+        records = excluded.records,
+        source = excluded.source,
+        updated_by_machine_id = excluded.updated_by_machine_id,
+        updated_at = excluded.updated_at
+    `).bind(accountID, keyHash, date, input, cacheRead, cacheWrite, output, reasoning, total, records, source, machineID));
+  }
+  if (statements.length) await env.DB.batch(statements);
+  return { upsertedDays: statements.length, skippedDays };
+}
+
+async function syncDueOpenRouterConnections(env) {
+  const rows = await env.DB.prepare(`
+    SELECT *
+    FROM openrouter_connections
+    WHERE status != 'disabled'
+      AND (last_sync_at IS NULL OR last_sync_at <= datetime('now', '-55 minutes'))
+    ORDER BY COALESCE(last_sync_at, '1970-01-01') ASC
+    LIMIT 25
+  `).all();
+  for (const connection of rows.results || []) {
+    try {
+      await syncOpenRouterConnection(env, connection, { full: false });
+    } catch (error) {
+      console.error("openrouter scheduled sync failed", connection.id, error && error.message ? error.message : error);
+    }
+  }
+}
+
+async function syncOpenRouterConnection(env, connection, { full = false } = {}) {
+  const key = await decryptStoredSecret(env, connection.key_ciphertext, connection.key_nonce);
+  if (key.error) {
+    await markOpenRouterConnectionError(env, connection.id, key.error);
+    return { error: key.error };
+  }
+  const start = full || !connection.last_sync_at ? OPENROUTER_SYNC_SINCE : dateOffsetUTC(connection.last_sync_at.slice(0, 10), -7);
+  const days = await fetchOpenRouterUsageDays(key.value, start, tomorrowUTCISO());
+  if (days.error) {
+    await markOpenRouterConnectionError(env, connection.id, days.error);
+    return { error: days.error };
+  }
+  const result = await upsertOpenRouterDays(env, {
+    accountID: connection.account_id,
+    keyHash: connection.openrouter_key_hash,
+    days: days.days,
+    source: "server",
+  });
+  if (result.error) {
+    await markOpenRouterConnectionError(env, connection.id, result.error);
+    return { error: result.error };
+  }
+  await env.DB.prepare(`
+    UPDATE openrouter_connections
+    SET status = 'active', last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE id = ?
+  `).bind(connection.id).run();
+  return { ok: true, upserted_days: result.upsertedDays, skipped_days: result.skippedDays };
+}
+
+async function markOpenRouterConnectionError(env, id, error) {
+  await env.DB.prepare(`
+    UPDATE openrouter_connections
+    SET status = 'error', last_error = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE id = ?
+  `).bind(cleanText(error, 160), id).run();
+}
+
+async function fetchOpenRouterUsageDays(key, start, end) {
+  const startDate = parseUTCDate(start);
+  const endDate = new Date(end);
+  if (!startDate || Number.isNaN(endDate.getTime())) return { error: "openrouter_fetch_failed" };
+  const allDays = [];
+  for (let cursor = new Date(startDate); cursor < endDate;) {
+    const chunkEnd = new Date(cursor);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 366);
+    const effectiveEnd = chunkEnd < endDate ? chunkEnd : endDate;
+    const result = await fetchOpenRouterUsageRange(key, cursor.toISOString().slice(0, 10), effectiveEnd.toISOString());
+    if (result.error) return result;
+    allDays.push(...result.days);
+    cursor = effectiveEnd;
+  }
+  return { days: allDays };
+}
+
+async function fetchOpenRouterUsageRange(key, start, end) {
+  const res = await fetch(OPENROUTER_ANALYTICS_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      metrics: ["request_count", "tokens_prompt", "tokens_completion", "reasoning_tokens", "cached_tokens", "tokens_total"],
+      dimensions: [],
+      granularity: "day",
+      limit: MAX_SYNC_DAYS,
+      time_range: { start: `${start}T00:00:00Z`, end },
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: openRouterError(data, "openrouter_fetch_failed"), status: res.status };
+  const rows = data && data.data && Array.isArray(data.data.data) ? data.data.data : [];
+  const days = rows.map((row) => {
+    const input = int(row.tokens_prompt);
+    const output = int(row.tokens_completion);
+    const reasoning = int(row.reasoning_tokens);
+    return {
+      date_utc: String(row.date__day || "").slice(0, 10),
+      records: int(row.request_count),
+      usage: {
+        input,
+        output,
+        cache_read: int(row.cached_tokens),
+        reasoning,
+        total: input + output + reasoning,
+      },
+    };
+  });
+  return { days };
+}
+
+async function validateOpenRouterKey(key) {
+  const res = await fetch(OPENROUTER_KEY_URL, { headers: { "Authorization": `Bearer ${key}` } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: openRouterError(data, "invalid_openrouter_key"), status: 400 };
+  const details = data && data.data ? data.data : {};
+  if (!details.is_management_key) return { error: "openrouter_management_key_required", status: 400 };
+  return { label: safeOpenRouterLabel(details.label) };
+}
+
+function safeOpenRouterLabel(value) {
+  value = cleanText(value || "OpenRouter", 80);
+  if (!value || value.startsWith("sk-or-")) return "OpenRouter";
+  return value;
+}
+
+function openRouterError(data, fallback) {
+  const message = data && data.error && data.error.message ? String(data.error.message).toLowerCase() : "";
+  if (message.includes("management")) return "openrouter_management_key_required";
+  if (message.includes("auth") || message.includes("invalid")) return "invalid_openrouter_key";
+  return fallback;
+}
+
+async function openRouterConnectionByID(env, id) {
+  return env.DB.prepare(`
+    SELECT c.*, a.kind, a.account_number, h.handle, a.display_name
+    FROM openrouter_connections c
+    JOIN accounts a ON a.id = c.account_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE c.id = ?
+  `).bind(id).first();
+}
+
+async function openRouterConnectionForKey(env, accountID, keyHash) {
+  return env.DB.prepare(`
+    SELECT c.*, a.kind, a.account_number, h.handle, a.display_name
+    FROM openrouter_connections c
+    JOIN accounts a ON a.id = c.account_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE c.account_id = ? AND c.openrouter_key_hash = ?
+  `).bind(accountID, keyHash).first();
+}
+
+async function openRouterConnectionRows(env, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT id, label, status, last_sync_at, last_error, created_at
+    FROM openrouter_connections
+    WHERE account_id = ?
+    ORDER BY created_at DESC
+  `).bind(accountID).all();
+  return rows.results || [];
+}
+
+function publicOpenRouterConnection(connection, sync = {}) {
+  return {
+    id: connection.id,
+    label: connection.label || "OpenRouter",
+    status: sync.error ? "error" : connection.status || "active",
+    last_sync_at: sync.ok ? new Date().toISOString() : connection.last_sync_at || null,
+    last_error: sync.error || connection.last_error || null,
+    sync,
+  };
+}
+
 async function profileStatsRoute(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return json({ error: "not_found" }, 404);
@@ -642,23 +994,43 @@ async function buildProfile(env, ref) {
 async function userDays(env, userID) {
   const rows = await env.DB.prepare(`
     SELECT date_utc, SUM(total_tokens) AS total_tokens
-    FROM daily_machine_usage
-    WHERE user_id = ?
+    FROM (
+      SELECT date_utc, total_tokens
+      FROM daily_machine_usage
+      WHERE user_id = ?
+      UNION ALL
+      SELECT date_utc, total_tokens
+      FROM openrouter_daily_usage
+      WHERE account_id = ?
+    )
     GROUP BY date_utc
     ORDER BY date_utc
-  `).bind(userID).all();
+  `).bind(userID, userID).all();
   return rows.results.map(dayRow);
 }
 
 async function orgDays(env, orgID) {
   const rows = await env.DB.prepare(`
-    SELECT d.date_utc, SUM(d.total_tokens) AS total_tokens
-    FROM daily_machine_usage d
-    JOIN memberships m ON m.user_id = d.user_id
-    WHERE m.org_id = ?
-    GROUP BY d.date_utc
-    ORDER BY d.date_utc
-  `).bind(orgID).all();
+    WITH openrouter_rows AS (
+      SELECT o.date_utc, o.openrouter_key_hash, MAX(o.total_tokens) AS total_tokens
+      FROM openrouter_daily_usage o
+      LEFT JOIN memberships m ON m.user_id = o.account_id
+      WHERE o.account_id = ? OR m.org_id = ?
+      GROUP BY o.date_utc, o.openrouter_key_hash
+    )
+    SELECT date_utc, SUM(total_tokens) AS total_tokens
+    FROM (
+      SELECT d.date_utc, d.total_tokens
+      FROM daily_machine_usage d
+      JOIN memberships m ON m.user_id = d.user_id
+      WHERE m.org_id = ?
+      UNION ALL
+      SELECT date_utc, total_tokens
+      FROM openrouter_rows
+    )
+    GROUP BY date_utc
+    ORDER BY date_utc
+  `).bind(orgID, orgID, orgID).all();
   return rows.results.map(dayRow);
 }
 
@@ -995,6 +1367,7 @@ async function appPage(request, env) {
   const account = await accountView(env, user.id);
   const emails = await emailRows(env, user.id);
   const machines = await machineRows(env, user.id);
+  const openRouterConnections = await openRouterConnectionRows(env, user.id);
   const orgs = await env.DB.prepare(`
     SELECT a.account_number, h.handle, a.display_name, m.role
     FROM memberships m
@@ -1036,6 +1409,7 @@ async function appPage(request, env) {
           <div class="section-head"><div><h2>Profile</h2><p class="muted">${esc(profileHelp)}</p></div></div>
           ${handleControl}
           ${profileMetadataForm(account, { kind: "user" })}
+          ${openRouterPanel(openRouterConnections, { kind: "user" })}
           <div class="email-list">${emails.map(emailRow).join("") || emptyState("No emails linked", "Add an email to use magic links and recover this profile.")}</div>
           <form class="form-stack" data-email data-email-action data-resend-label="Send verification again"><label for="profile-email">Add another email</label><div class="form-row"><input id="profile-email" name="email" placeholder="you@example.com" autocomplete="email"><button class="secondary">Send verification</button></div></form>
           <pre class="result" data-email-result hidden></pre>
@@ -1068,6 +1442,7 @@ async function orgsPage(request, env) {
   const requested = new URL(request.url).searchParams.get("org") || "";
   const selected = orgs.results.find((org) => accountRef(org) === requested || org.account_number === requested) || orgs.results[0] || null;
   const members = selected ? await orgMemberRows(env, selected.id) : [];
+  const openRouterConnections = selected ? await openRouterConnectionRows(env, selected.id) : [];
   const canManage = selected && canManageOrg(selected.role);
   return layout("Organizations — Burnfolio", `
     <main class="dash org-management">
@@ -1085,7 +1460,7 @@ async function orgsPage(request, env) {
           }).join("") || emptyState("No organizations yet", "Create one from the dashboard.")}</div>
         </aside>
         <section class="panel org-detail">
-          ${selected ? orgDetail(selected, members, canManage) : emptyState("No organization selected", "Create an organization before managing members.")}
+          ${selected ? orgDetail(selected, members, canManage, openRouterConnections) : emptyState("No organization selected", "Create an organization before managing members.")}
         </section>
       </section>
     </main>
@@ -1105,11 +1480,12 @@ async function orgMemberRows(env, orgID) {
   return rows.results || [];
 }
 
-function orgDetail(org, members, canManage) {
+function orgDetail(org, members, canManage, openRouterConnections = []) {
   const ref = accountRef(org);
   return `
     <div class="section-head"><div><h2>${esc(org.display_name || ref)}</h2><p class="muted"><a href="/${esc(ref)}">/${esc(ref)}</a> · your role is ${esc(org.role)}</p></div></div>
     ${canManage ? profileMetadataForm(org, { kind: "org", ref }) : ""}
+    ${canManage ? openRouterPanel(openRouterConnections, { kind: "org", ref }) : ""}
     ${canManage ? `<form class="form-stack org-add-member" data-add-member data-org="${esc(ref)}"><label for="org-member">Add a member or admin</label><div class="form-row"><input id="org-member" name="user" placeholder="username or account number"><select name="role"><option value="member">member</option><option value="admin">admin</option>${org.role === "owner" ? `<option value="owner">owner (transfer)</option>` : ""}</select><button>Add</button></div></form>` : `<p class="muted">Members can view the org here. Ask an admin or owner to change roles.</p>`}
     <div class="member-list">${members.map((member) => orgMemberRow(org, member, canManage)).join("")}</div>
   `;
@@ -1130,6 +1506,33 @@ function profileMetadataForm(account, { kind, ref = "" }) {
     </div>
     <div class="form-actions"><button type="submit" class="secondary">Save profile details</button><span class="result inline-result" data-profile-result hidden></span></div>
   </form>`;
+}
+
+function openRouterPanel(connections, { kind, ref = "" }) {
+  const attrs = kind === "org"
+    ? `data-openrouter data-openrouter-scope="org" data-org="${esc(ref)}"`
+    : `data-openrouter data-openrouter-scope="user"`;
+  const prefix = kind === "org" ? `org-openrouter-${ref}` : "openrouter";
+  return `<section class="integration-panel" ${attrs}>
+    <div class="section-head compact"><div><h3>OpenRouter</h3><p class="muted">Connect a management key to import account token usage hourly.</p></div></div>
+    <form class="form-stack" data-openrouter-connect>
+      <label for="${esc(prefix)}-key">Management key</label>
+      <div class="form-row"><input id="${esc(prefix)}-key" name="key" type="password" placeholder="sk-or-v1-..." autocomplete="off"><button type="submit" class="secondary">Connect</button></div>
+    </form>
+    <div class="result inline-result" data-openrouter-result hidden></div>
+    <div class="list integration-list">${connections.map((connection) => openRouterConnectionRow(connection, kind, ref)).join("") || emptyState("No OpenRouter key connected", "Use a management key. Burnfolio stores it encrypted and imports daily totals only.")}</div>
+  </section>`;
+}
+
+function openRouterConnectionRow(connection, kind, ref) {
+  const base = kind === "org"
+    ? `/api/orgs/${encodeURIComponent(ref)}/openrouter/connections/${encodeURIComponent(connection.id)}`
+    : `/api/openrouter/connections/${encodeURIComponent(connection.id)}`;
+  const state = connection.status === "error" ? `Error${connection.last_error ? `: ${connection.last_error}` : ""}` : connection.last_sync_at ? `Synced ${formatDate(connection.last_sync_at.slice(0, 10))}` : "Waiting for first sync";
+  return `<div class="row integration-row" data-openrouter-connection="${esc(connection.id)}" data-openrouter-base="${esc(base)}">
+    <div><strong>${esc(connection.label || "OpenRouter")}</strong><span>${esc(state)}</span></div>
+    <div class="row-actions"><button type="button" class="secondary" data-openrouter-sync>Sync now</button><button type="button" class="secondary" data-openrouter-delete>Remove</button></div>
+  </div>`;
 }
 
 function orgMemberRow(org, member, canManage) {
@@ -1677,6 +2080,10 @@ function howWeCountPage(isSignedIn = false) {
           <p>Machine tokens tag usage to one machine and one profile or organization. Personal profiles show your machines. Organization graphs sum member usage assigned to the org.</p>
         </article>
         <article class="learn-card">
+          <h2>OpenRouter imports</h2>
+          <p>OpenRouter management keys can import daily account totals. Burnfolio stores those rows separately from machine-local inference data and deduplicates by profile, key fingerprint, and day.</p>
+        </article>
+        <article class="learn-card">
           <h2>Duplicate protection</h2>
           <p>Syncs are idempotent by day, tool, model, machine, and profile. Re-running <code>pyro</code> updates totals instead of adding the same local records again.</p>
         </article>
@@ -2205,6 +2612,10 @@ function dashboardScript(profileRef) {
         handle_unavailable: "That username is already taken.",
         invalid_email: "Enter a valid email address.",
         invalid_url: "Use valid website, GitHub, and X.com links.",
+        invalid_openrouter_key: "Enter a valid OpenRouter management key.",
+        openrouter_management_key_required: "Use an OpenRouter management key, not a regular inference key.",
+        openrouter_key_storage_not_configured: "OpenRouter key storage is not configured yet.",
+        openrouter_fetch_failed: "OpenRouter usage could not be fetched right now.",
         email_already_claimed: "That email is already attached to another account.",
         email_send_failed: "The email could not be sent. Try again shortly.",
         org_handle_unavailable: "That organization username is already taken.",
@@ -2358,6 +2769,63 @@ function dashboardScript(profileRef) {
         restoreButton(button);
       }
     });
+    document.querySelectorAll("[data-openrouter]").forEach(panel => {
+      const result = panel.querySelector("[data-openrouter-result]");
+      const connect = panel.querySelector("[data-openrouter-connect]");
+      const endpoint = panel.dataset.openrouterScope === "org"
+        ? "/api/orgs/" + encodeURIComponent(panel.dataset.org) + "/openrouter/connections"
+        : "/api/openrouter/connections";
+      function show(message) {
+        if (!result) return;
+        result.hidden = false;
+        result.textContent = message;
+      }
+      connect?.addEventListener("submit", async event => {
+        event.preventDefault();
+        const button = submitButton(connect);
+        setBusy(button, "Connecting...");
+        show("Checking OpenRouter key...");
+        try {
+          const { ok, data } = await post(connect, endpoint);
+          show(ok ? "Connected. Usage import is running." : messageFor(data));
+          ok ? setTimeout(() => location.reload(), 900) : restoreButton(button);
+        } catch {
+          show("Something went wrong. Check the key and try again.");
+          restoreButton(button);
+        }
+      });
+      panel.querySelectorAll("[data-openrouter-sync]").forEach(button => button.addEventListener("click", async () => {
+        const row = button.closest("[data-openrouter-connection]");
+        setBusy(button, "Syncing...");
+        show("Fetching OpenRouter usage...");
+        try {
+          const res = await fetch(row.dataset.openrouterBase + "/sync", { method:"POST" });
+          const data = await res.json();
+          show(res.ok ? "OpenRouter usage synced." : messageFor(data));
+          res.ok ? setTimeout(() => location.reload(), 900) : restoreButton(button);
+        } catch {
+          show("OpenRouter usage could not be fetched right now.");
+          restoreButton(button);
+        }
+      }));
+      panel.querySelectorAll("[data-openrouter-delete]").forEach(button => button.addEventListener("click", async () => {
+        if (!confirm("Remove this OpenRouter connection? Imported usage will remain on the graph.")) return;
+        const row = button.closest("[data-openrouter-connection]");
+        setBusy(button, "Removing...");
+        try {
+          const res = await fetch(row.dataset.openrouterBase, { method:"DELETE" });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) location.reload();
+          else {
+            show(messageFor(data));
+            restoreButton(button);
+          }
+        } catch {
+          show("Something went wrong. Try again.");
+          restoreButton(button);
+        }
+      }));
+    });
     document.querySelector("[data-email]").addEventListener("submit", async e => {
       e.preventDefault();
       const form = e.currentTarget;
@@ -2413,6 +2881,10 @@ function orgManagementScript() {
         unauthorized: "Your session expired. Sign in again.",
         invalid_handle: "Choose a different username. Some app paths are reserved.",
         invalid_url: "Use valid website, GitHub, and X.com links.",
+        invalid_openrouter_key: "Enter a valid OpenRouter management key.",
+        openrouter_management_key_required: "Use an OpenRouter management key, not a regular inference key.",
+        openrouter_key_storage_not_configured: "OpenRouter key storage is not configured yet.",
+        openrouter_fetch_failed: "OpenRouter usage could not be fetched right now.",
         org_not_found: "Organization not found.",
         forbidden: "Only org admins or owners can manage members.",
         owner_required: "Only the current owner can transfer ownership.",
@@ -2487,6 +2959,57 @@ function orgManagementScript() {
         restoreControl(button);
       }
     }));
+    document.querySelectorAll("[data-openrouter]").forEach(panel => {
+      const result = panel.querySelector("[data-openrouter-result]");
+      const connect = panel.querySelector("[data-openrouter-connect]");
+      const endpoint = "/api/orgs/" + encodeURIComponent(panel.dataset.org) + "/openrouter/connections";
+      function show(message) {
+        if (!result) return;
+        result.hidden = false;
+        result.textContent = message;
+      }
+      connect?.addEventListener("submit", async event => {
+        event.preventDefault();
+        const button = submitButton(connect);
+        const body = Object.fromEntries(new FormData(connect).entries());
+        setBusy(button, "Connecting...");
+        show("Checking OpenRouter key...");
+        try {
+          const { ok, data } = await send(endpoint, "POST", body);
+          show(ok ? "Connected. Usage import is running." : messageFor(data));
+          ok ? setTimeout(() => location.reload(), 900) : restoreControl(button);
+        } catch {
+          show("Something went wrong. Check the key and try again.");
+          restoreControl(button);
+        }
+      });
+      panel.querySelectorAll("[data-openrouter-sync]").forEach(button => button.addEventListener("click", async () => {
+        const row = button.closest("[data-openrouter-connection]");
+        setBusy(button, "Syncing...");
+        show("Fetching OpenRouter usage...");
+        try {
+          const { ok, data } = await send(row.dataset.openrouterBase + "/sync", "POST");
+          show(ok ? "OpenRouter usage synced." : messageFor(data));
+          ok ? setTimeout(() => location.reload(), 900) : restoreControl(button);
+        } catch {
+          show("OpenRouter usage could not be fetched right now.");
+          restoreControl(button);
+        }
+      }));
+      panel.querySelectorAll("[data-openrouter-delete]").forEach(button => button.addEventListener("click", async () => {
+        if (!confirm("Remove this OpenRouter connection? Imported usage will remain on the graph.")) return;
+        const row = button.closest("[data-openrouter-connection]");
+        setBusy(button, "Removing...");
+        try {
+          const { ok, data } = await send(row.dataset.openrouterBase, "DELETE");
+          ok ? location.reload() : show(messageFor(data));
+          if (!ok) restoreControl(button);
+        } catch {
+          show("Something went wrong. Try again.");
+          restoreControl(button);
+        }
+      }));
+    });
     document.querySelectorAll("[data-member-role] select").forEach(select => select.addEventListener("change", async event => {
       const form = event.target.closest("[data-member-role]");
       const body = Object.fromEntries(new FormData(form).entries());
@@ -3000,6 +3523,17 @@ function boundedInt(value, max) {
   return rounded;
 }
 
+function cleanOpenRouterKey(value) {
+  value = String(value || "").trim();
+  if (!value || value.length > 240) return "";
+  return value.startsWith("sk-or-v1-") ? value : "";
+}
+
+function cleanOpenRouterHash(value) {
+  value = String(value || "").trim().toLowerCase();
+  return value.match(/^[a-f0-9]{64}$/) ? value : "";
+}
+
 function validIngestDate(value) {
   if (!String(value || "").match(/^\d{4}-\d{2}-\d{2}$/)) return false;
   if (value < MIN_INGEST_DATE) return false;
@@ -3007,6 +3541,64 @@ function validIngestDate(value) {
   if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) return false;
   const tomorrow = new Date(todayUTCDate().getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   return value <= tomorrow;
+}
+
+function tomorrowUTCISO() {
+  return new Date(todayUTCDate().getTime() + 24 * 60 * 60 * 1000).toISOString();
+}
+
+function dateOffsetUTC(date, offsetDays) {
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return OPENROUTER_SYNC_SINCE;
+  parsed.setUTCDate(parsed.getUTCDate() + offsetDays);
+  const value = parsed.toISOString().slice(0, 10);
+  return value < OPENROUTER_SYNC_SINCE ? OPENROUTER_SYNC_SINCE : value;
+}
+
+function parseUTCDate(date) {
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) return null;
+  return parsed;
+}
+
+async function encryptStoredSecret(env, value) {
+  const key = await storageCryptoKey(env);
+  if (!key) return { error: "openrouter_key_storage_not_configured" };
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(value);
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, encoded);
+  return { ciphertext: base64Encode(new Uint8Array(encrypted)), nonce: base64Encode(nonce) };
+}
+
+async function decryptStoredSecret(env, ciphertext, nonce) {
+  const key = await storageCryptoKey(env);
+  if (!key) return { error: "openrouter_key_storage_not_configured" };
+  try {
+    const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64Decode(nonce) }, key, base64Decode(ciphertext));
+    return { value: new TextDecoder().decode(decrypted) };
+  } catch {
+    return { error: "openrouter_key_decrypt_failed" };
+  }
+}
+
+async function storageCryptoKey(env) {
+  const secret = String(env.OPENROUTER_KEY_SECRET || "");
+  if (secret.length < 32) return null;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+function base64Encode(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64Decode(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 function dayRow(row) {

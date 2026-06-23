@@ -72,6 +72,9 @@ Useful installer flags:
 --machine <machine-token>
 --schedule <none|hourly|daily>
 --providers amp,claude,codebuff,codex,copilot,droid,gemini,goose,hermes,kilo,kimi,openclaw,opencode,pi,qwen
+--openrouter-key <management-key>
+--openrouter-profile <account-or-org>
+--openrouter-since 2020-01-01
 --server https://burnfolio.ai
 --install-dir ~/.local/bin
 --version v0.1.2
@@ -118,6 +121,7 @@ pyro --json
 pyro --no-sync
 pyro --home /path/to/home
 pyro --profile bf_ab12cd34 --machine bfm_...
+pyro --profile bf_ab12cd34 --machine bfm_... --openrouter-key sk-or-v1-... --openrouter-profile bf_ab12cd34
 pyro install --profile bf_ab12cd34 --machine bfm_...
 pyro uninstall
 ```
@@ -138,6 +142,33 @@ provider totals plus the same date/CLI/model segments for the future server API.
 When `--profile` and `--machine` are provided, the CLI uploads all local history to
 Burnfolio as one idempotent total per day. Re-running the same command
 replaces each machine/day row instead of double-counting it.
+
+## OpenRouter Usage
+
+Burnfolio can import OpenRouter account usage from an OpenRouter management key.
+Management keys are not inference keys, but they can read account analytics.
+
+Local import keeps the OpenRouter key on your machine and uploads only daily
+token totals:
+
+```sh
+pyro install \
+  --profile <account-or-username> \
+  --machine <machine-token> \
+  --openrouter-key <openrouter-management-key> \
+  --openrouter-profile <account-or-org>
+
+pyro
+```
+
+You can also connect a management key in the Burnfolio dashboard for your
+personal profile or from an organization management page. Server-side
+connections are encrypted and fetched hourly.
+
+OpenRouter data is stored separately from local machine inference data and is
+deduplicated by target profile, OpenRouter key fingerprint, and day. If the same
+key is synced from multiple machines or from both Pyro and the dashboard, the
+same daily rows are updated instead of added twice.
 
 ## Hosted Flow
 
