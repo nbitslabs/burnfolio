@@ -88,8 +88,8 @@ async function route(request, env) {
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "DELETE") return removeOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
   if (path === "/api/ingest" && request.method === "POST") return ingest(request, env);
   if (path.match(/^\/api\/profiles\/[^/]+\/stats$/)) return profileStatsRoute(env, decodeURIComponent(path.split("/")[3]));
-  if (path.match(/^\/embed\/[^/]+\.svg$/)) return embedSVGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
-  if (path.match(/^\/embed\/[^/]+$/)) return embedPage(env, decodeURIComponent(path.split("/")[2]));
+  if (path.match(/^\/embed\/[^/]+\.svg$/)) return embedSVGPage(request, env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
+  if (path.match(/^\/embed\/[^/]+$/)) return embedPage(request, env, decodeURIComponent(path.split("/")[2]));
   if (path.match(/^\/embed\/[^/]+\/script\.js$/)) return embedScript(request, decodeURIComponent(path.split("/")[2]));
   if (path.match(/^\/[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/)) return profilePage(request, env, path.slice(1));
 
@@ -565,16 +565,16 @@ async function ogProfilePNGPage(env, ref) {
   return pngResponse(body, profile ? 200 : 404, profile ? 300 : 60);
 }
 
-async function embedPage(env, ref) {
+async function embedPage(request, env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return html(notFoundPage(), 404);
-  return html(embedHtml(profile));
+  return html(embedHtml(profile, cleanTheme(new URL(request.url).searchParams.get("theme"))));
 }
 
-async function embedSVGPage(env, ref) {
+async function embedSVGPage(request, env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return new Response("Not found", { status: 404 });
-  return new Response(svgEmbed(profile), {
+  return new Response(svgEmbed(profile, cleanTheme(new URL(request.url).searchParams.get("theme"))), {
     headers: {
       "Content-Type": "image/svg+xml; charset=utf-8",
       "Cache-Control": "public, max-age=300",
@@ -584,7 +584,8 @@ async function embedSVGPage(env, ref) {
 
 function embedScript(request, ref) {
   const origin = new URL(request.url).origin;
-  return new Response(`document.currentScript.insertAdjacentHTML("afterend", '<iframe src="${origin}/embed/${escapeJS(encodeURIComponent(ref))}" title="Burnfolio token burn" style="width:100%;max-width:760px;height:220px;border:0;border-radius:8px;overflow:hidden"></iframe>');`, {
+  const theme = cleanTheme(new URL(request.url).searchParams.get("theme"));
+  return new Response(`document.currentScript.insertAdjacentHTML("afterend", '<iframe src="${origin}/embed/${escapeJS(encodeURIComponent(ref))}${embedThemeQuery(theme)}" title="Burnfolio token burn" style="width:100%;max-width:760px;height:220px;border:0;border-radius:8px;overflow:hidden"></iframe>');`, {
     headers: { "Content-Type": "application/javascript; charset=utf-8" },
   });
 }
@@ -1119,9 +1120,6 @@ function profileHtml(profile, isSignedIn = false) {
   const hasLabel = Boolean(profile.account.display_name && profile.account.display_name !== "Anonymous builder" && profile.account.display_name !== profile.account.account_number);
   const displayName = hasHandle ? profile.account.handle : hasLabel ? profile.account.display_name : profile.account.account_number;
   const stats = profile.stats;
-  const scriptSnippet = `<script src="https://burnfolio.ai/embed/${name}/script.js"></script>`;
-  const svgSnippet = `<img src="https://burnfolio.ai/embed/${name}.svg" alt="Burnfolio token burn graph">`;
-  const markdownSnippet = `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg)](https://burnfolio.ai/${name})`;
   const profileURL = `https://burnfolio.ai/${name}`;
   const shareImagePath = `/og/${encodeURIComponent(name)}.png`;
   const shareImageURL = `https://burnfolio.ai${shareImagePath}`;
@@ -1131,9 +1129,8 @@ function profileHtml(profile, isSignedIn = false) {
     <main class="profile">
       <header class="profile-head">
         <div>
-          <div class="badges"><span class="icon-badge" aria-label="${esc(profile.account.kind)}">${faIcon(profile.account.kind)}</span>${hasHandle || hasLabel ? "" : `<span>anonymous</span>`}</div>
           <h1>${esc(displayName)}</h1>
-          <p>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active days</p>
+          <p class="profile-summary"><span class="profile-kind-icon" aria-label="${esc(profile.account.kind)}">${faIcon(profile.account.kind)}</span><span class="summary-separator" aria-hidden="true"></span><span>${formatInt(profile.total_tokens)} tokens burned across ${formatInt(stats.active_days)} active days</span></p>
         </div>
         <div class="actions"><button class="share-button" type="button" data-share-open data-share-image="${esc(shareImagePath)}" data-share-text="${esc(shareText)}">Share</button><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
       </header>
@@ -1148,11 +1145,7 @@ function profileHtml(profile, isSignedIn = false) {
       ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" })}
       <details class="embed-disclosure">
         <summary>Embed this graph</summary>
-        <div class="snippets">
-          ${snippet("Iframe script", scriptSnippet)}
-          ${snippet("Static SVG", svgSnippet)}
-          ${snippet("GitHub Markdown", markdownSnippet)}
-        </div>
+        ${embedThemePanel(name)}
       </details>
       ${shareDialog(shareImagePath, shareText)}
     </main>
@@ -1191,20 +1184,50 @@ function shareDialog(imageURL, text) {
   </div>`;
 }
 
-function embedHtml(profile) {
-  const name = profile.account.handle || profile.account.account_number;
-  const scale = heatmapScale(profile.days);
-  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days`, scale })}</div><script>${globalScript()}</script>`;
+const EMBED_THEMES = ["orange", "green", "blue"];
+
+function embedThemePanel(name) {
+  const snippets = {};
+  for (const theme of EMBED_THEMES) {
+    const suffix = embedThemeQuery(theme);
+    snippets[theme] = {
+      script: `<script src="https://burnfolio.ai/embed/${name}/script.js${suffix}"></script>`,
+      svg: `<img src="https://burnfolio.ai/embed/${name}.svg${suffix}" alt="Burnfolio token burn graph">`,
+      markdown: `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg${suffix})](https://burnfolio.ai/${name})`,
+    };
+  }
+  return `<div class="embed-panel" data-embed-panel>
+    <div class="embed-theme-tabs" role="tablist" aria-label="Embed theme">
+      ${EMBED_THEMES.map((theme) => `<button type="button" class="theme-tab${theme === "orange" ? " active" : ""}" role="tab" aria-selected="${theme === "orange" ? "true" : "false"}" data-embed-theme="${theme}">${esc(theme)}</button>`).join("")}
+    </div>
+    <div class="snippets">
+      ${themeSnippet("Iframe script", snippets, "script")}
+      ${themeSnippet("Static SVG", snippets, "svg")}
+      ${themeSnippet("GitHub Markdown", snippets, "markdown")}
+    </div>
+  </div>`;
 }
 
-function svgEmbed(profile) {
+function themeSnippet(label, snippets, key) {
+  const attrs = EMBED_THEMES.map((theme) => `data-${theme}="${esc(snippets[theme][key])}"`).join(" ");
+  const initial = snippets.orange[key];
+  return `<div class="snippet" data-theme-snippet><div><span>${esc(label)}</span><button type="button" class="secondary copy" data-copy="${esc(initial)}">Copy</button></div><code ${attrs}>${esc(initial)}</code></div>`;
+}
+
+function embedHtml(profile, theme = "orange") {
+  const name = profile.account.handle || profile.account.account_number;
+  const scale = heatmapScale(profile.days);
+  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed theme-${esc(theme)}"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days`, scale })}</div><script>${globalScript()}</script>`;
+}
+
+function svgEmbed(profile, theme = "orange") {
   const name = profile.account.handle || profile.account.account_number;
   const cells = heatmapCellData(profile.days, heatmapScale(profile.days));
   const cellSize = 10;
   const gap = 4;
   const left = 22;
   const top = 62;
-  const colors = ["#2A2017", "#7A3D12", "#C0590F", "#F2611C", "#FF8A3D"];
+  const colors = embedPalette(theme);
   const rects = cells.map((cell, i) => {
     const x = left + Math.floor(i / 7) * (cellSize + gap);
     const y = top + (i % 7) * (cellSize + gap);
@@ -2144,6 +2167,28 @@ function globalScript() {
         setTimeout(() => button.textContent = "Copy", 1200);
       });
     });
+    document.querySelectorAll("[data-embed-theme]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const panel = button.closest("[data-embed-panel]");
+        if (!panel) return;
+        const theme = button.dataset.embedTheme || "orange";
+        panel.querySelectorAll("[data-embed-theme]").forEach((tab) => {
+          const active = tab === button;
+          tab.classList.toggle("active", active);
+          tab.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        panel.querySelectorAll("[data-theme-snippet]").forEach((snippet) => {
+          const code = snippet.querySelector("code");
+          const copy = snippet.querySelector("[data-copy]");
+          const next = code?.dataset?.[theme] || code?.dataset?.orange || "";
+          if (code) code.textContent = next;
+          if (copy) {
+            copy.dataset.copy = next;
+            copy.textContent = "Copy";
+          }
+        });
+      });
+    });
     document.querySelectorAll("[data-share-open]").forEach((button) => {
       button.addEventListener("click", () => {
         const dialog = document.querySelector("[data-share-dialog]");
@@ -2406,6 +2451,25 @@ function cleanVersion(value) {
   value = String(value || "").trim();
   if (!value || value.length > 40) return "";
   return value.match(/^v?[0-9][0-9A-Za-z._+-]{0,39}$/) ? value : "";
+}
+
+function cleanTheme(value) {
+  value = String(value || "").trim().toLowerCase();
+  return EMBED_THEMES.includes(value) ? value : "orange";
+}
+
+function embedThemeQuery(theme) {
+  theme = cleanTheme(theme);
+  return theme === "orange" ? "" : `?theme=${theme}`;
+}
+
+function embedPalette(theme) {
+  const palettes = {
+    orange: ["#2A2017", "#7A3D12", "#C0590F", "#F2611C", "#FF8A3D"],
+    green: ["#18251B", "#1F5D35", "#2F8C4C", "#48B86A", "#8CE99A"],
+    blue: ["#172235", "#214D7A", "#2E7BC4", "#4AA3FF", "#9BD1FF"],
+  };
+  return palettes[cleanTheme(theme)] || palettes.orange;
 }
 
 async function sendMagicEmail(env, to, link) {

@@ -562,32 +562,26 @@ form {
   word-break: break-word;
   margin: 0;
 }
-.badges {
+.profile-summary {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
 }
-.badges span {
+.profile-summary .profile-kind-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--burnfolio-line);
-  background: var(--burnfolio-wash);
-  border-radius: 999px;
-  padding: 5px 9px;
-  color: var(--burnfolio-ember);
-  font-size: 12px;
-  font-weight: 800;
+  color: var(--burnfolio-blaze);
+  font-size: 13px;
+  line-height: 1;
+  flex: 0 0 auto;
 }
-.badges .icon-badge {
-  width: 34px;
-  height: 30px;
-  padding: 0;
+.summary-separator {
+  width: 1px;
+  height: 16px;
+  background: var(--burnfolio-line);
+  flex: 0 0 auto;
 }
-.badges .icon-badge .fa-icon {
-  font-size: 14px;
-}
-
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -1174,6 +1168,38 @@ body.share-open {
 .utility-disclosure .snippet {
   margin-top: 14px;
 }
+.embed-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+.embed-theme-tabs {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--burnfolio-line);
+  border-radius: var(--burnfolio-r-pill);
+  background: var(--burnfolio-wash);
+  overflow-x: auto;
+}
+.theme-tab {
+  min-height: 32px;
+  padding: 7px 12px;
+  color: var(--burnfolio-ash);
+  background: transparent;
+  box-shadow: none;
+  text-transform: capitalize;
+}
+.theme-tab:hover {
+  color: var(--burnfolio-ink);
+  background: rgba(255, 255, 255, .42);
+}
+.theme-tab.active {
+  color: #fff;
+  background: var(--burnfolio-flame-deep);
+}
 .secret {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1236,6 +1262,20 @@ body.share-open {
   border: 1px solid var(--burnfolio-line-dark);
   border-radius: 12px;
   color: var(--burnfolio-chalk);
+}
+.embed.theme-green {
+  --burnfolio-heat-0: #18251B;
+  --burnfolio-heat-1: #1F5D35;
+  --burnfolio-heat-2: #2F8C4C;
+  --burnfolio-heat-3: #48B86A;
+  --burnfolio-heat-4: #8CE99A;
+}
+.embed.theme-blue {
+  --burnfolio-heat-0: #172235;
+  --burnfolio-heat-1: #214D7A;
+  --burnfolio-heat-2: #2E7BC4;
+  --burnfolio-heat-3: #4AA3FF;
+  --burnfolio-heat-4: #9BD1FF;
 }
 .embed .graph-meta a {
   color: var(--burnfolio-ash-dark);
