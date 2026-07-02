@@ -6,6 +6,9 @@ routes = [
   { pattern = "burnfolio.ai", custom_domain = true }
 ]
 
+[vars]
+MAX_DAILY_TOKENS_PER_SOURCE = "100000000000"
+
 [triggers]
 crons = ["0 * * * *"]
 

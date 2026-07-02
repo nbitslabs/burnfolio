@@ -5,6 +5,7 @@ const MAX_SYNC_DAYS = 3000;
 const MAX_TOKEN_FIELD = 1_000_000_000_000;
 const MAX_RECORDS_PER_DAY = 1_000_000;
 const MIN_INGEST_DATE = "2020-01-01";
+const DEFAULT_MAX_DAILY_TOKENS_PER_SOURCE = 100_000_000_000;
 const OPENROUTER_ANALYTICS_URL = "https://openrouter.ai/api/v1/analytics/query";
 const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
 const OPENROUTER_SYNC_SINCE = "2020-01-01";
@@ -103,6 +104,8 @@ async function route(request, env) {
   if (path.match(/^\/api\/orgs\/[^/]+\/members$/) && request.method === "POST") return addOrgMemberRoute(request, env, path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "PATCH") return updateOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "DELETE") return removeOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
+  if (path.match(/^\/api\/orgs\/[^/]+\/invite\/accept$/) && request.method === "POST") return acceptOrgInviteRoute(request, env, decodeURIComponent(path.split("/")[3]));
+  if (path.match(/^\/api\/orgs\/[^/]+\/invite\/decline$/) && request.method === "POST") return declineOrgInviteRoute(request, env, decodeURIComponent(path.split("/")[3]));
   if (path === "/api/ingest" && request.method === "POST") return ingest(request, env);
   if (path.match(/^\/api\/profiles\/[^/]+\/stats$/)) return profileStatsRoute(env, decodeURIComponent(path.split("/")[3]));
   if (path.match(/^\/embed\/[^/]+\.svg$/)) return embedSVGPage(request, env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
@@ -306,15 +309,21 @@ async function me(request, env) {
   const user = await requireUser(request, env);
   if (!user) return json({ user: null });
   const machines = await machineRows(env, user.id);
-  const orgs = await env.DB.prepare(`
-    SELECT a.account_number, h.handle, a.display_name, m.role
+  const memberships = await env.DB.prepare(`
+    SELECT a.account_number, h.handle, a.display_name, m.role, m.status
     FROM memberships m
     JOIN accounts a ON a.id = m.org_id
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE m.user_id = ?
     ORDER BY a.created_at DESC
   `).bind(user.id).all();
-  return json({ account: await accountView(env, user.id), machines: machines.results, orgs: orgs.results });
+  const rows = memberships.results || [];
+  return json({
+    account: await accountView(env, user.id),
+    machines: machines.results,
+    orgs: rows.filter((row) => row.status === "active"),
+    invites: rows.filter((row) => row.status === "pending"),
+  });
 }
 
 async function globalStats(request, env) {
@@ -332,13 +341,34 @@ async function readGlobalStats(env) {
   const gridStart = startOfWeekUTC(first);
   const start = gridStart.toISOString().slice(0, 10);
   const end = today.toISOString().slice(0, 10);
+  const clamp = dailyTokenClamp(env);
   const rows = await env.DB.prepare(`
-    SELECT date_utc, total_tokens
-    FROM global_daily_usage
+    SELECT date_utc, SUM(total_tokens) AS total_tokens
+    FROM (
+      SELECT date_utc, MIN(total_tokens, ?) AS total_tokens FROM daily_machine_usage
+      UNION ALL
+      SELECT date_utc, MIN(total_tokens, ?) AS total_tokens FROM (
+        SELECT date_utc, MAX(total_tokens) AS total_tokens
+        FROM openrouter_daily_usage
+        GROUP BY openrouter_key_hash, date_utc
+      )
+    )
     WHERE date_utc BETWEEN ? AND ?
+    GROUP BY date_utc
     ORDER BY date_utc
-  `).bind(start, end).all();
-  const total = await env.DB.prepare("SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens FROM global_daily_usage").first();
+  `).bind(clamp, clamp, start, end).all();
+  const total = await env.DB.prepare(`
+    SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens
+    FROM (
+      SELECT MIN(total_tokens, ?) AS total_tokens FROM daily_machine_usage
+      UNION ALL
+      SELECT MIN(total_tokens, ?) AS total_tokens FROM (
+        SELECT MAX(total_tokens) AS total_tokens
+        FROM openrouter_daily_usage
+        GROUP BY openrouter_key_hash, date_utc
+      )
+    )
+  `).bind(clamp, clamp).first();
   let lastYearTokens = 0;
   for (const row of rows.results || []) {
     if (row.date_utc >= first.toISOString().slice(0, 10)) lastYearTokens += int(row.total_tokens);
@@ -513,7 +543,16 @@ async function addOrgMemberRoute(request, env, orgRef) {
   if (!member || member.kind !== "user") return json({ error: "user_not_found" }, 404);
   const role = cleanRole(body.role);
   if (role === "owner" && actor !== "owner") return json({ error: "owner_required" }, 403);
-  await setOrgMemberRole(env, org.id, member.id, role);
+  if (role === "owner") {
+    // Ownership can only be transferred to a member who already accepted
+    // an invite — otherwise the transfer would activate a membership (and
+    // absorb the target's usage into the org) without their consent.
+    const existing = await anyMembership(env, org.id, member.id);
+    if (!existing || existing.status !== "active") return json({ error: "member_must_accept_invite" }, 409);
+    await setOrgMemberRole(env, org.id, member.id, role);
+  } else {
+    await inviteOrgMember(env, org.id, member.id, role);
+  }
   return json({ ok: true });
 }
 
@@ -530,12 +569,19 @@ async function updateOrgMemberRoute(request, env, orgRef, memberRef) {
   if (!canManageOrg(actor)) return json({ error: "forbidden" }, 403);
   const member = await resolveAccount(env, memberRef);
   if (!member || member.kind !== "user") return json({ error: "user_not_found" }, 404);
-  const current = await membershipRole(env, org.id, member.id);
+  const current = await anyMembership(env, org.id, member.id);
   if (!current) return json({ error: "member_not_found" }, 404);
   const body = await readBody(request);
   const role = cleanRole(body.role);
   if (role === "owner" && actor !== "owner") return json({ error: "owner_required" }, 403);
-  if (current === "owner" && role !== "owner") return json({ error: "owner_transfer_required" }, 409);
+  if (current.role === "owner" && role !== "owner") return json({ error: "owner_transfer_required" }, 409);
+  if (role === "owner" && current.status !== "active") return json({ error: "member_must_accept_invite" }, 409);
+  if (current.status === "pending") {
+    // Role changes on a pending invite update the invite, not the
+    // membership — acceptance is still required before usage rolls up.
+    await inviteOrgMember(env, org.id, member.id, role);
+    return json({ ok: true });
+  }
   await setOrgMemberRole(env, org.id, member.id, role);
   return json({ ok: true });
 }
@@ -553,10 +599,30 @@ async function removeOrgMemberRoute(request, env, orgRef, memberRef) {
   if (!canManageOrg(actor)) return json({ error: "forbidden" }, 403);
   const member = await resolveAccount(env, memberRef);
   if (!member || member.kind !== "user") return json({ error: "user_not_found" }, 404);
-  const current = await membershipRole(env, org.id, member.id);
+  const current = await anyMembership(env, org.id, member.id);
   if (!current) return json({ error: "member_not_found" }, 404);
-  if (current === "owner") return json({ error: "owner_cannot_be_removed" }, 409);
+  if (current.role === "owner") return json({ error: "owner_cannot_be_removed" }, 409);
   await env.DB.prepare("DELETE FROM memberships WHERE org_id = ? AND user_id = ?").bind(org.id, member.id).run();
+  return json({ ok: true });
+}
+
+async function acceptOrgInviteRoute(request, env, orgRef) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const org = await resolveAccount(env, orgRef);
+  if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
+  const accepted = await acceptOrgInvite(env, org.id, user.id);
+  if (!accepted) return json({ error: "invite_not_found" }, 404);
+  return json({ ok: true, org: await accountView(env, org.id) });
+}
+
+async function declineOrgInviteRoute(request, env, orgRef) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const org = await resolveAccount(env, orgRef);
+  if (!org || org.kind !== "org") return json({ error: "org_not_found" }, 404);
+  const declined = await declineOrgInvite(env, org.id, user.id);
+  if (!declined) return json({ error: "invite_not_found" }, 404);
   return json({ ok: true });
 }
 
@@ -757,7 +823,7 @@ async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, mac
     const explicitTotal = usage.total ?? usage.tokens_total ?? day.total_tokens;
     const total = explicitTotal !== undefined && explicitTotal !== null && explicitTotal !== ""
       ? boundedInt(explicitTotal, MAX_TOKEN_FIELD)
-      : boundedInt(input + output + reasoning, MAX_TOKEN_FIELD);
+      : boundedInt(input + cacheRead + cacheWrite + output, MAX_TOKEN_FIELD);
     const records = boundedInt(day.records ?? day.request_count, MAX_RECORDS_PER_DAY);
     if ([input, cacheRead, cacheWrite, output, reasoning, total, records].some((value) => value === null)) {
       skippedDays++;
@@ -891,15 +957,16 @@ async function fetchOpenRouterUsageRange(key, start, end) {
     const input = int(row.tokens_prompt);
     const output = int(row.tokens_completion);
     const reasoning = int(row.reasoning_tokens);
+    const cacheRead = int(row.cached_tokens);
     return {
       date_utc: String(row.date__day || "").slice(0, 10),
       records: int(row.request_count),
       usage: {
         input,
         output,
-        cache_read: int(row.cached_tokens),
+        cache_read: cacheRead,
         reasoning,
-        total: input + output + reasoning,
+        total: input + cacheRead + output,
       },
     };
   });
@@ -1029,59 +1096,62 @@ async function buildProfile(env, ref) {
 }
 
 async function userDays(env, userID) {
+  const clamp = dailyTokenClamp(env);
   const rows = await env.DB.prepare(`
     SELECT date_utc, SUM(total_tokens) AS total_tokens
     FROM (
-      SELECT date_utc, total_tokens
-      FROM daily_machine_usage
-      WHERE user_id = ?
+      SELECT d.date_utc, MIN(d.total_tokens, ?) AS total_tokens
+      FROM daily_machine_usage d
+      JOIN machines mm ON mm.id = d.machine_id
+      WHERE d.user_id = ? AND mm.org_id IS NULL
       UNION ALL
-      SELECT date_utc, total_tokens
+      SELECT date_utc, MIN(total_tokens, ?) AS total_tokens
       FROM openrouter_daily_usage
       WHERE account_id = ?
     )
     GROUP BY date_utc
     ORDER BY date_utc
-  `).bind(userID, userID).all();
+  `).bind(clamp, userID, clamp, userID).all();
   return rows.results.map(dayRow);
 }
 
 async function orgDays(env, orgID) {
+  const clamp = dailyTokenClamp(env);
   const rows = await env.DB.prepare(`
     WITH openrouter_rows AS (
       SELECT o.date_utc, o.openrouter_key_hash, MAX(o.total_tokens) AS total_tokens
       FROM openrouter_daily_usage o
-      LEFT JOIN memberships m ON m.user_id = o.account_id
-      WHERE o.account_id = ? OR m.org_id = ?
+      LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
+      WHERE o.account_id = ? OR m.user_id IS NOT NULL
       GROUP BY o.date_utc, o.openrouter_key_hash
     )
     SELECT date_utc, SUM(total_tokens) AS total_tokens
     FROM (
-      SELECT d.date_utc, d.total_tokens
+      SELECT d.date_utc, MIN(d.total_tokens, ?) AS total_tokens
       FROM daily_machine_usage d
-      JOIN memberships m ON m.user_id = d.user_id
+      JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active'
       WHERE m.org_id = ?
       UNION ALL
-      SELECT date_utc, total_tokens
+      SELECT date_utc, MIN(total_tokens, ?) AS total_tokens
       FROM openrouter_rows
     )
     GROUP BY date_utc
     ORDER BY date_utc
-  `).bind(orgID, orgID, orgID).all();
+  `).bind(orgID, orgID, clamp, orgID, clamp).all();
   return rows.results.map(dayRow);
 }
 
 async function orgMemberCount(env, orgID) {
-  const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM memberships WHERE org_id = ?").bind(orgID).first();
+  const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM memberships WHERE org_id = ? AND status = 'active'").bind(orgID).first();
   return int(row && row.count);
 }
 
 async function updateAccountMetadata(env, accountID, fields) {
-  await env.DB.prepare(`
-    UPDATE accounts
-    SET bio = ?, website_url = ?, github_url = ?, x_url = ?
-    WHERE id = ?
-  `).bind(fields.bio || null, fields.website_url || null, fields.github_url || null, fields.x_url || null, accountID).run();
+  const columns = ["bio", "website_url", "github_url", "x_url"].filter((key) => key in fields);
+  if (!columns.length) return;
+  const assignments = columns.map((key) => `${key} = ?`).join(", ");
+  const values = columns.map((key) => fields[key] || null);
+  await env.DB.prepare(`UPDATE accounts SET ${assignments} WHERE id = ?`).bind(...values, accountID).run();
 }
 
 async function createUser(env, { email, handle }) {
@@ -1202,8 +1272,12 @@ async function verifyEmailForUser(env, userID, email) {
 }
 
 async function membershipRole(env, orgID, userID) {
-  const row = await env.DB.prepare("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?").bind(orgID, userID).first();
+  const row = await env.DB.prepare("SELECT role FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'").bind(orgID, userID).first();
   return row ? row.role : "";
+}
+
+async function anyMembership(env, orgID, userID) {
+  return env.DB.prepare("SELECT role, status FROM memberships WHERE org_id = ? AND user_id = ?").bind(orgID, userID).first();
 }
 
 function canManageOrg(role) {
@@ -1212,6 +1286,14 @@ function canManageOrg(role) {
 
 function cleanRole(value) {
   return ["member", "admin", "owner"].includes(value) ? value : "member";
+}
+
+async function inviteOrgMember(env, orgID, userID, role) {
+  await env.DB.prepare(`
+    INSERT INTO memberships (org_id, user_id, role, status)
+    VALUES (?, ?, ?, 'pending')
+    ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role
+  `).bind(orgID, userID, role).run();
 }
 
 async function setOrgMemberRole(env, orgID, userID, role) {
@@ -1231,6 +1313,16 @@ async function setOrgMemberRole(env, orgID, userID, role) {
     VALUES (?, ?, ?)
     ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role
   `).bind(orgID, userID, role).run();
+}
+
+async function acceptOrgInvite(env, orgID, userID) {
+  const result = await env.DB.prepare("UPDATE memberships SET status = 'active' WHERE org_id = ? AND user_id = ? AND status = 'pending'").bind(orgID, userID).run();
+  return result.meta && result.meta.changes > 0;
+}
+
+async function declineOrgInvite(env, orgID, userID) {
+  const result = await env.DB.prepare("DELETE FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'pending'").bind(orgID, userID).run();
+  return result.meta && result.meta.changes > 0;
 }
 
 function machineCanSyncToAccount(machine, account) {
@@ -1404,14 +1496,16 @@ async function appPage(request, env) {
   const emails = await emailRows(env, user.id);
   const machines = await machineRows(env, user.id);
   const openRouterConnections = await openRouterConnectionRows(env, user.id);
-  const orgs = await env.DB.prepare(`
-    SELECT a.account_number, h.handle, a.display_name, m.role
+  const memberships = await env.DB.prepare(`
+    SELECT a.account_number, h.handle, a.display_name, m.role, m.status
     FROM memberships m
     JOIN accounts a ON a.id = m.org_id
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE m.user_id = ?
     ORDER BY a.created_at DESC
   `).bind(user.id).all();
+  const orgs = { results: (memberships.results || []).filter((row) => row.status === "active") };
+  const invites = (memberships.results || []).filter((row) => row.status === "pending");
   const profileRef = account.handle || account.account_number;
   const machineScope = orgs.results.length
     ? `<select name="org" aria-label="Machine scope"><option value="">Personal profile</option>${orgs.results.map((org) => `<option value="${esc(accountRef(org))}">${esc(org.display_name || accountRef(org))}</option>`).join("")}</select>`
@@ -1452,6 +1546,7 @@ async function appPage(request, env) {
         </section>
         <section class="panel">
           <div class="section-head"><div><h2>Organizations</h2><p class="muted">Create org profiles and aggregate member token burn.</p></div></div>
+          ${invites.length ? `<div class="section-head compact"><div><h3>Org invites</h3><p class="muted">Accept to roll your usage into the org graph, or decline.</p></div></div><div class="list" data-org-invites>${invites.map(orgInviteRow).join("")}</div>` : ""}
           <form class="form-stack" data-org><label for="org-handle">New organization</label><div class="form-row"><input id="org-handle" name="handle" placeholder="org username"><input name="name" placeholder="display name"><button>Create</button></div></form>
           <pre class="result" data-org-result hidden></pre>
           <div class="list">${orgs.results.map(orgRow).join("") || emptyState("No organizations yet", "Create an org when you want a shared burn graph for a team.")}</div>
@@ -1472,7 +1567,7 @@ async function orgsPage(request, env) {
     FROM memberships m
     JOIN accounts a ON a.id = m.org_id
     LEFT JOIN handles h ON h.account_id = a.id
-    WHERE m.user_id = ?
+    WHERE m.user_id = ? AND m.status = 'active'
     ORDER BY lower(a.display_name), a.created_at DESC
   `).bind(user.id).all();
   const requested = new URL(request.url).searchParams.get("org") || "";
@@ -1506,12 +1601,12 @@ async function orgsPage(request, env) {
 
 async function orgMemberRows(env, orgID) {
   const rows = await env.DB.prepare(`
-    SELECT a.account_number, h.handle, a.display_name, m.role, m.created_at
+    SELECT a.account_number, h.handle, a.display_name, m.role, m.status, m.created_at
     FROM memberships m
     JOIN accounts a ON a.id = m.user_id
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE m.org_id = ?
-    ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, lower(COALESCE(h.handle, a.display_name, a.account_number))
+    ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, CASE m.status WHEN 'pending' THEN 1 ELSE 0 END, lower(COALESCE(h.handle, a.display_name, a.account_number))
   `).bind(orgID).all();
   return rows.results || [];
 }
@@ -1522,7 +1617,7 @@ function orgDetail(org, members, canManage, openRouterConnections = []) {
     <div class="section-head"><div><h2>${esc(org.display_name || ref)}</h2><p class="muted"><a href="/${esc(ref)}">/${esc(ref)}</a> · your role is ${esc(org.role)}</p></div></div>
     ${canManage ? profileMetadataForm(org, { kind: "org", ref }) : ""}
     ${canManage ? openRouterPanel(openRouterConnections, { kind: "org", ref }) : ""}
-    ${canManage ? `<form class="form-stack org-add-member" data-add-member data-org="${esc(ref)}"><label for="org-member">Add a member or admin</label><div class="form-row"><input id="org-member" name="user" placeholder="username or account number"><select name="role"><option value="member">member</option><option value="admin">admin</option>${org.role === "owner" ? `<option value="owner">owner (transfer)</option>` : ""}</select><button>Add</button></div></form>` : `<p class="muted">Members can view the org here. Ask an admin or owner to change roles.</p>`}
+    ${canManage ? `<form class="form-stack org-add-member" data-add-member data-org="${esc(ref)}"><label for="org-member">Invite a member or admin</label><div class="form-row"><input id="org-member" name="user" placeholder="username or account number"><select name="role"><option value="member">member</option><option value="admin">admin</option>${org.role === "owner" ? `<option value="owner">owner (transfer)</option>` : ""}</select><button>Invite</button></div></form><p class="muted">Invited members roll their usage into this org's graph once they accept.</p>` : `<p class="muted">Members can view the org here. Ask an admin or owner to change roles.</p>`}
     <div class="member-list">${members.map((member) => orgMemberRow(org, member, canManage)).join("")}</div>
   `;
 }
@@ -1575,6 +1670,7 @@ function orgMemberRow(org, member, canManage) {
   const orgRef = accountRef(org);
   const memberRef = member.handle || member.account_number;
   const isOwner = member.role === "owner";
+  const isPending = member.status === "pending";
   const controls = canManage
     ? `<div class="row-actions">
         <form data-member-role data-org="${esc(orgRef)}" data-member="${esc(memberRef)}">
@@ -1584,10 +1680,10 @@ function orgMemberRow(org, member, canManage) {
             ${org.role === "owner" ? `<option value="owner"${member.role === "owner" ? " selected" : ""}>owner${isOwner ? "" : " (transfer)"}</option>` : ""}
           </select>
         </form>
-        ${isOwner ? `<span class="row-note">Owner cannot be removed.</span>` : `<button type="button" class="secondary" data-remove-member data-org="${esc(orgRef)}" data-member="${esc(memberRef)}">Remove</button>`}
+        ${isOwner ? `<span class="row-note">Owner cannot be removed.</span>` : `<button type="button" class="secondary" data-remove-member data-org="${esc(orgRef)}" data-member="${esc(memberRef)}">${isPending ? "Cancel invite" : "Remove"}</button>`}
       </div>`
     : "";
-  return `<div class="row member-row"><div><strong>${esc(member.handle || member.display_name || member.account_number)}</strong><span>${esc(member.account_number)} · ${esc(member.role)}</span></div>${controls}</div>`;
+  return `<div class="row member-row"><div><strong>${esc(member.handle || member.display_name || member.account_number)}</strong><span>${esc(member.account_number)} · ${esc(member.role)}${isPending ? " · invited" : ""}</span></div>${controls}</div>`;
 }
 
 function machineRow(machine, fallbackProfileRef) {
@@ -1600,6 +1696,11 @@ function machineRow(machine, fallbackProfileRef) {
 function orgRow(org) {
   const ref = org.handle || org.account_number;
   return `<div class="row"><div><strong><a href="/${esc(ref)}">${esc(ref)}</a></strong><span>${esc(org.display_name || "Organization")} · ${esc(org.role)}</span></div><div class="row-actions"><a class="button secondary" href="/app/orgs?org=${encodeURIComponent(ref)}">Manage</a></div></div>`;
+}
+
+function orgInviteRow(org) {
+  const ref = org.handle || org.account_number;
+  return `<div class="row" data-org-invite="${esc(ref)}"><div><strong>${esc(org.display_name || ref)}</strong><span>Invited as ${esc(org.role)}</span></div><div class="row-actions"><button type="button" data-invite-accept data-org="${esc(ref)}">Accept</button><button type="button" class="secondary" data-invite-decline data-org="${esc(ref)}">Decline</button></div></div>`;
 }
 
 function emailRow(row) {
@@ -2099,6 +2200,8 @@ function howWeCountPage(isSignedIn = false) {
           <h2>What counts</h2>
           <p><code>pyro</code> reads supported local session records for Claude, Codex, OpenCode, and Pi, normalizes token usage, and syncs daily totals to your profile.</p>
           <p>Each square represents the total tokens Burnfolio has received for that day. Higher totals render hotter cells.</p>
+          <p>A day's total is input + cache read + cache write + output tokens. Reasoning tokens are informational only and are not added to the total, since providers generally already include them in the output count.</p>
+          <p>Each source (a machine or an OpenRouter connection) is capped at a configurable per-day ceiling to keep a single misconfigured client from distorting a graph. Raw usage is always stored; only the displayed total is capped.</p>
         </article>
         <article class="learn-card">
           <h2>What does not count</h2>
@@ -2107,7 +2210,8 @@ function howWeCountPage(isSignedIn = false) {
         </article>
         <article class="learn-card">
           <h2>Machines and organizations</h2>
-          <p>Machine tokens tag usage to one machine and one profile or organization. Personal profiles show your machines. Organization graphs sum member usage assigned to the org.</p>
+          <p>Machine tokens tag usage to one machine and one profile or organization. A machine scoped to an organization contributes to that org's graph only, not your personal graph.</p>
+          <p>Organization graphs also roll up members' personal usage, but only after a member accepts the org's invite. Pending invites don't contribute usage until accepted.</p>
         </article>
         <article class="learn-card">
           <h2>OpenRouter imports</h2>
@@ -2124,7 +2228,7 @@ function howWeCountPage(isSignedIn = false) {
           <p><strong>Check the machine token.</strong> Copy the install command from the machine row in your dashboard so the profile and machine are both set.</p>
           <p><strong>Run a manual sync.</strong> Run <code>pyro sync</code> after a session to confirm the local collector can find records.</p>
           <p><strong>Check your source tool.</strong> If a tool has not written usage records yet, Burnfolio has nothing to count.</p>
-          <p><strong>Look at the right profile.</strong> Organization machines contribute to the org graph; personal machines contribute to your profile.</p>
+          <p><strong>Look at the right profile.</strong> Organization machines contribute to the org graph only; personal machines contribute to your profile.</p>
         </div>
       </section>
     </main>
@@ -2375,7 +2479,9 @@ function profileStats(days, total) {
   const dayMap = new Map(days.map((day) => [day.date_utc, day.total_tokens]));
   const today = todayUTCDate();
   let currentStreak = 0;
-  for (let i = 0; i < 365; i++) {
+  const todayHasUsage = (dayMap.get(today.toISOString().slice(0, 10)) || 0) > 0;
+  const streakStart = todayHasUsage ? 0 : 1;
+  for (let i = streakStart; i < streakStart + 365; i++) {
     const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
     const key = d.toISOString().slice(0, 10);
     if ((dayMap.get(key) || 0) <= 0) break;
@@ -2656,6 +2762,8 @@ function dashboardScript(profileRef) {
         owner_transfer_required: "Transfer ownership to another member before changing the current owner.",
         owner_cannot_be_removed: "The owner cannot be removed.",
         member_not_found: "That member was not found.",
+        member_must_accept_invite: "That user has to accept the org invite before ownership can be transferred.",
+        invite_not_found: "That invite is no longer available.",
         user_not_found: "No user was found for that account or username."
       };
       return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
@@ -2901,6 +3009,38 @@ function dashboardScript(profileRef) {
       await fetch("/api/logout", { method:"POST" });
       location.href = "/";
     });
+    document.querySelectorAll("[data-invite-accept]").forEach(button => button.addEventListener("click", async () => {
+      setBusy(button, "Accepting...");
+      try {
+        const res = await fetch("/api/orgs/" + encodeURIComponent(button.dataset.org) + "/invite/accept", { method:"POST" });
+        const data = await res.json();
+        if (res.ok) location.reload();
+        else {
+          alert(messageFor(data));
+          restoreButton(button);
+        }
+      } catch {
+        alert("Something went wrong. Try again.");
+        restoreButton(button);
+      }
+    }));
+    document.querySelectorAll("[data-invite-decline]").forEach(button => button.addEventListener("click", async () => {
+      if (!confirm("Decline this org invite?")) return;
+      const row = button.closest("[data-org-invite]");
+      setBusy(button, "Declining...");
+      try {
+        const res = await fetch("/api/orgs/" + encodeURIComponent(button.dataset.org) + "/invite/decline", { method:"POST" });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) row.remove();
+        else {
+          alert(messageFor(data));
+          restoreButton(button);
+        }
+      } catch {
+        alert("Something went wrong. Try again.");
+        restoreButton(button);
+      }
+    }));
   `;
 }
 
@@ -2921,6 +3061,7 @@ function orgManagementScript() {
         owner_transfer_required: "Transfer ownership to another member before changing the current owner.",
         owner_cannot_be_removed: "The owner cannot be removed.",
         member_not_found: "That member was not found.",
+        member_must_accept_invite: "That user has to accept the org invite before ownership can be transferred.",
         user_not_found: "No user was found for that account or username."
       };
       return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
@@ -2959,7 +3100,7 @@ function orgManagementScript() {
       event.preventDefault();
       const button = submitButton(form);
       const body = Object.fromEntries(new FormData(form).entries());
-      setBusy(button, "Adding...");
+      setBusy(button, "Inviting...");
       try {
         const { ok, data } = await send("/api/orgs/" + encodeURIComponent(form.dataset.org) + "/members", "POST", body);
         ok ? location.reload() : alert(messageFor(data));
@@ -3399,12 +3540,24 @@ function cleanTheme(value) {
 }
 
 function cleanProfileMetadata(body) {
-  const bio = cleanText(body.bio, 280);
-  const website = cleanWebsiteURL(body.website_url || body.website);
-  const github = cleanSocialURL(body.github_url || body.github, "github.com");
-  const x = cleanSocialURL(body.x_url || body.x || body.twitter, "x.com");
-  if (website === null || github === null || x === null) return { error: "invalid_url" };
-  return { bio, website_url: website, github_url: github, x_url: x };
+  const fields = {};
+  if ("bio" in body) fields.bio = cleanText(body.bio, 280);
+  if ("website_url" in body || "website" in body) {
+    const website = cleanWebsiteURL(body.website_url ?? body.website);
+    if (website === null) return { error: "invalid_url" };
+    fields.website_url = website;
+  }
+  if ("github_url" in body || "github" in body) {
+    const github = cleanSocialURL(body.github_url ?? body.github, "github.com");
+    if (github === null) return { error: "invalid_url" };
+    fields.github_url = github;
+  }
+  if ("x_url" in body || "x" in body || "twitter" in body) {
+    const x = cleanSocialURL(body.x_url ?? body.x ?? body.twitter, "x.com");
+    if (x === null) return { error: "invalid_url" };
+    fields.x_url = x;
+  }
+  return fields;
 }
 
 function cleanWebsiteURL(value) {
@@ -3564,6 +3717,11 @@ function boundedInt(value, max) {
   const rounded = Math.floor(n);
   if (!Number.isSafeInteger(rounded) || rounded < 0 || rounded > max) return null;
   return rounded;
+}
+
+function dailyTokenClamp(env) {
+  const raw = Number(env && env.MAX_DAILY_TOKENS_PER_SOURCE);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_DAILY_TOKENS_PER_SOURCE;
 }
 
 function cleanOpenRouterKey(value) {
