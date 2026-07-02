@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -77,16 +78,86 @@ func collectKilo(ctx context.Context, opts Options) ([]Event, []string, error) {
 	return events, warnings, nil
 }
 
-func openReadOnlyDB(path string) (*sql.DB, error) {
-	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&immutable=1"}
-	return sql.Open("sqlite", u.String())
+// openReadOnlyDB opens a possibly-live SQLite database for reading. Opening
+// a live database with mode=ro&immutable=1 bypasses SQLite's locking/WAL
+// machinery, which can return corrupt or torn reads while the owning app is
+// writing to it. To avoid that, we snapshot the database file (and any -wal
+// / -shm siblings) into a temp directory and open the immutable copy
+// instead. The returned cleanup func removes the temp copy and must always
+// be called, even on error.
+func openReadOnlyDB(path string) (*sql.DB, func(), error) {
+	noop := func() {}
+	if copyPath, cleanup, err := snapshotSQLiteDB(path); err == nil {
+		u := url.URL{Scheme: "file", Path: copyPath, RawQuery: "mode=ro&immutable=1"}
+		db, openErr := sql.Open("sqlite", u.String())
+		if openErr != nil {
+			cleanup()
+			return nil, noop, openErr
+		}
+		return db, cleanup, nil
+	}
+	// Fall back to opening the original file directly, without the
+	// immutable flag, so SQLite still respects locking/WAL semantics.
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, noop, err
+	}
+	return db, noop, nil
+}
+
+// snapshotSQLiteDB copies path (and its -wal/-shm siblings, if present) into
+// a fresh temp directory and returns the path to the copied main database
+// file along with a cleanup func that removes the temp directory.
+func snapshotSQLiteDB(path string) (string, func(), error) {
+	tmpDir, err := os.MkdirTemp("", "pyro-sqlite-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+
+	base := filepath.Base(path)
+	dstPath := filepath.Join(tmpDir, base)
+	if err := copyFile(path, dstPath); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		src := path + suffix
+		if _, statErr := os.Stat(src); statErr != nil {
+			continue
+		}
+		if err := copyFile(src, dstPath+suffix); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+	}
+	return dstPath, cleanup, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func readHermesDB(path string) ([]Event, error) {
-	db, err := openReadOnlyDB(path)
+	db, cleanup, err := openReadOnlyDB(path)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	defer db.Close()
 	rows, err := db.Query(`
 		SELECT id, model, billing_provider, started_at, message_count,
@@ -128,10 +199,11 @@ func readHermesDB(path string) ([]Event, error) {
 }
 
 func readGooseDB(path string) ([]Event, error) {
-	db, err := openReadOnlyDB(path)
+	db, cleanup, err := openReadOnlyDB(path)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	defer db.Close()
 	rows, err := db.Query(`
 		SELECT id, model_config_json, provider_name, created_at,
@@ -176,10 +248,11 @@ func readGooseDB(path string) ([]Event, error) {
 }
 
 func readKiloDB(path string) ([]Event, error) {
-	db, err := openReadOnlyDB(path)
+	db, cleanup, err := openReadOnlyDB(path)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	defer db.Close()
 	rows, err := db.Query(`SELECT id, session_id, data FROM message`)
 	if err != nil {

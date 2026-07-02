@@ -94,6 +94,24 @@ func TestFlagSetProvided(t *testing.T) {
 	}
 }
 
+func TestMaskedHandlesShortValues(t *testing.T) {
+	cases := []struct {
+		value string
+		want  string
+	}{
+		{"", "(not configured)"},
+		{"a", "*"},
+		{"ab", "**"},
+		{"abc", "***"},
+		{"abcdefghijklm", "abcdefgh...jklm"},
+	}
+	for _, tc := range cases {
+		if got := masked(tc.value); got != tc.want {
+			t.Fatalf("masked(%q) = %q, want %q", tc.value, got, tc.want)
+		}
+	}
+}
+
 func TestSyncReportReturnsServerErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

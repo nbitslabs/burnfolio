@@ -468,15 +468,23 @@ func removeCron(profile string) error {
 	if _, err := exec.LookPath("crontab"); err != nil {
 		return nil
 	}
-	out, err := exec.Command("crontab", "-l").Output()
+	out, err := exec.Command("crontab", "-l").CombinedOutput()
 	if err != nil {
-		out = nil
+		// "no crontab for user" (exit status 1 with that message on most
+		// platforms) just means there's nothing to remove. Any other
+		// failure (permission error, transient issue, etc.) must abort
+		// without touching the user's crontab.
+		if strings.Contains(strings.ToLower(string(out)), "no crontab for") {
+			return nil
+		}
+		return fmt.Errorf("crontab -l failed, leaving crontab untouched: %w", err)
 	}
-	var kept []string
+	var original, kept []string
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		original = append(original, line)
 		if profile != "" && strings.Contains(line, "# burnfolio-pyro "+profile) {
 			continue
 		}
@@ -484,6 +492,10 @@ func removeCron(profile string) error {
 			continue
 		}
 		kept = append(kept, line)
+	}
+	if len(kept) == len(original) {
+		// Nothing to remove; skip the write entirely.
+		return nil
 	}
 	cmd := exec.Command("crontab", "-")
 	cmd.Stdin = strings.NewReader(strings.Join(kept, "\n") + "\n")
@@ -529,6 +541,9 @@ func masked(value string) string {
 		return "(not configured)"
 	}
 	if len(value) <= 12 {
+		if len(value) <= 3 {
+			return strings.Repeat("*", len(value))
+		}
 		return value[:3] + "..."
 	}
 	return value[:8] + "..." + value[len(value)-4:]

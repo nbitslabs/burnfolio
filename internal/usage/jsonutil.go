@@ -16,6 +16,12 @@ import (
 
 type object map[string]any
 
+// readJSONL parses a JSON-lines file, calling handle for each valid object.
+// Malformed lines (bad JSON, or lines handle rejects) and overlong lines are
+// skipped rather than aborting the whole file, so records after a bad line
+// are still processed. A single aggregate warning summarizing how many
+// lines were skipped is returned once the file has been fully read, rather
+// than failing on the first bad line.
 func readJSONL(path string, handle func(line int, obj object) error) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -23,26 +29,33 @@ func readJSONL(path string, handle func(line int, obj object) error) error {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	buf := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buf, 32*1024*1024)
-
+	reader := bufio.NewReader(file)
 	line := 0
-	for scanner.Scan() {
-		line++
-		raw := bytes.TrimSpace(scanner.Bytes())
-		if len(raw) == 0 {
-			continue
+	skipped := 0
+	for {
+		raw, readErr := reader.ReadBytes('\n')
+		if len(raw) > 0 {
+			line++
+			trimmed := bytes.TrimSpace(raw)
+			if len(trimmed) > 0 {
+				if obj, err := decodeObject(trimmed); err != nil {
+					skipped++
+				} else if err := handle(line, obj); err != nil {
+					skipped++
+				}
+			}
 		}
-		obj, err := decodeObject(raw)
-		if err != nil {
-			return fmt.Errorf("%s:%d: %w", path, line, err)
-		}
-		if err := handle(line, obj); err != nil {
-			return fmt.Errorf("%s:%d: %w", path, line, err)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return fmt.Errorf("%s: %w", path, readErr)
 		}
 	}
-	return scanner.Err()
+	if skipped > 0 {
+		return fmt.Errorf("%s: skipped %d malformed line(s)", path, skipped)
+	}
+	return nil
 }
 
 func decodeObject(raw []byte) (object, error) {

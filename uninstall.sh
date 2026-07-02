@@ -73,14 +73,27 @@ if command -v pyro >/dev/null 2>&1; then
 fi
 
 if [ "$keep_cron" != "1" ] && command -v crontab >/dev/null 2>&1; then
-  if [ -n "$profile" ]; then
-    marker="# burnfolio-pyro ${profile}"
-    current="$(crontab -l 2>/dev/null | grep -vF "$marker" || true)"
+  crontab_err_file="$(mktemp)"
+  crontab_status=0
+  existing="$(crontab -l 2>"$crontab_err_file")" || crontab_status=$?
+  crontab_err="$(cat "$crontab_err_file" 2>/dev/null || true)"
+  rm -f "$crontab_err_file"
+  if [ "$crontab_status" -ne 0 ] && ! printf '%s' "$crontab_err" | grep -qi 'no crontab for'; then
+    echo "Warning: could not read existing crontab, leaving it untouched." >&2
+  elif [ "$crontab_status" -ne 0 ]; then
+    : # no crontab for this user; nothing to remove
   else
-    current="$(crontab -l 2>/dev/null | grep -v '# burnfolio-pyro ' || true)"
+    if [ -n "$profile" ]; then
+      marker="# burnfolio-pyro ${profile}"
+      current="$(printf '%s\n' "$existing" | grep -vF "$marker" || true)"
+    else
+      current="$(printf '%s\n' "$existing" | grep -v '# burnfolio-pyro ' || true)"
+    fi
+    if [ "$current" != "$existing" ]; then
+      printf '%s\n' "$current" | sed '/^$/d' | crontab -
+      echo "Removed Burnfolio cron sync entries."
+    fi
   fi
-  printf '%s\n' "$current" | sed '/^$/d' | crontab -
-  echo "Removed Burnfolio cron sync entries."
 fi
 
 if [ "$remove_binary" = "1" ] && [ "$keep_binary" != "1" ]; then

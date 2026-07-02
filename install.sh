@@ -173,7 +173,8 @@ prompt_existing_token() {
   fi
   if [ -z "$machine" ]; then
     printf "Machine token: " > /dev/tty
-    IFS= read -r machine < /dev/tty || machine=""
+    IFS= read -rs machine < /dev/tty || machine=""
+    printf "\n" > /dev/tty
   fi
 
   if [ -z "$profile" ] || [ -z "$machine" ]; then
@@ -295,11 +296,21 @@ if [ -n "$profile" ] && [ "$schedule" != "" ] && [ "$schedule" != "none" ]; then
     daily) cron_time="17 3 * * *" ;;
   esac
   cron_marker="# burnfolio-pyro ${profile}"
+  mkdir -p "${HOME}/.pyro"
   sync_cmd="$(shell_quote "$pyro_path") --providers $(shell_quote "$providers") --server $(shell_quote "$server") --profile $(shell_quote "$profile") --machine $(shell_quote "$machine")"
-  cron_line="${cron_time} ${sync_cmd} >/tmp/burnfolio-pyro.log 2>&1 ${cron_marker}"
-  current="$(crontab -l 2>/dev/null | grep -vF "$cron_marker" || true)"
-  printf '%s\n%s\n' "$current" "$cron_line" | sed '/^$/d' | crontab -
-  echo "Installed ${schedule} cron sync for ${profile}."
+  cron_line="${cron_time} ${sync_cmd} >>$(shell_quote "${HOME}/.pyro/sync.log") 2>&1 ${cron_marker}"
+  cron_err_file="$(mktemp)"
+  cron_read_status=0
+  existing_cron="$(crontab -l 2>"$cron_err_file")" || cron_read_status=$?
+  cron_read_err="$(cat "$cron_err_file" 2>/dev/null || true)"
+  rm -f "$cron_err_file"
+  if [ "$cron_read_status" -ne 0 ] && ! printf '%s' "$cron_read_err" | grep -qi 'no crontab for'; then
+    echo "Warning: could not read existing crontab; skipping cron setup. Re-run install to retry." >&2
+  else
+    current="$(printf '%s\n' "$existing_cron" | grep -vF "$cron_marker" || true)"
+    printf '%s\n%s\n' "$current" "$cron_line" | sed '/^$/d' | crontab -
+    echo "Installed ${schedule} cron sync for ${profile}."
+  fi
 fi
 
 echo "Done."
