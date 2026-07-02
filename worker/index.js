@@ -77,6 +77,7 @@ async function route(request, env) {
   if (path === "/signup") return authRoute(request, env, "signup");
   if (path === "/signin") return authRoute(request, env, "signin");
   if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
+  if (path === "/privacy") return html(privacyPage(await signedIn(request, env)));
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/app/orgs") return html(await orgsPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
@@ -388,9 +389,12 @@ function emptyGlobalStats() {
 async function platformStats(env) {
   const row = await env.DB.prepare(`
     SELECT
-      SUM(CASE WHEN kind = 'user' THEN 1 ELSE 0 END) AS users,
-      SUM(CASE WHEN kind = 'org' THEN 1 ELSE 0 END) AS orgs
-    FROM accounts
+      SUM(CASE WHEN a.kind = 'user' AND (
+        EXISTS (SELECT 1 FROM daily_machine_usage d WHERE d.user_id = a.id)
+        OR EXISTS (SELECT 1 FROM openrouter_daily_usage o WHERE o.account_id = a.id)
+      ) THEN 1 ELSE 0 END) AS users,
+      SUM(CASE WHEN a.kind = 'org' THEN 1 ELSE 0 END) AS orgs
+    FROM accounts a
   `).first();
   return {
     users: int(row && row.users),
@@ -1063,14 +1067,20 @@ async function ogProfilePNGPage(env, ref) {
 
 async function embedPage(request, env, ref) {
   const profile = await buildProfile(env, ref);
+  const params = new URL(request.url).searchParams;
+  const theme = cleanTheme(params.get("theme"));
+  const mode = cleanMode(params.get("mode"));
   if (!profile) return html(notFoundPage(), 404, { embed: true });
-  return html(embedHtml(profile, cleanTheme(new URL(request.url).searchParams.get("theme"))), 200, { embed: true });
+  return html(embedHtml(profile, theme, mode), 200, { embed: true });
 }
 
 async function embedSVGPage(request, env, ref) {
   const profile = await buildProfile(env, ref);
+  const params = new URL(request.url).searchParams;
+  const theme = cleanTheme(params.get("theme"));
+  const mode = cleanMode(params.get("mode"));
   if (!profile) return new Response("Not found", { status: 404 });
-  return new Response(svgEmbed(profile, cleanTheme(new URL(request.url).searchParams.get("theme"))), {
+  return new Response(svgEmbed(profile, theme, mode), {
     headers: {
       "Content-Type": "image/svg+xml; charset=utf-8",
       "Cache-Control": "public, max-age=300",
@@ -1080,8 +1090,10 @@ async function embedSVGPage(request, env, ref) {
 
 function embedScript(request, ref) {
   const origin = new URL(request.url).origin;
-  const theme = cleanTheme(new URL(request.url).searchParams.get("theme"));
-  return new Response(`document.currentScript.insertAdjacentHTML("afterend", '<iframe src="${origin}/embed/${escapeJS(encodeURIComponent(ref))}${embedThemeQuery(theme)}" title="Burnfolio token burn" style="width:100%;max-width:760px;height:220px;border:0;border-radius:8px;overflow:hidden"></iframe>');`, {
+  const params = new URL(request.url).searchParams;
+  const theme = cleanTheme(params.get("theme"));
+  const mode = cleanMode(params.get("mode"));
+  return new Response(`document.currentScript.insertAdjacentHTML("afterend", '<iframe src="${origin}/embed/${escapeJS(encodeURIComponent(ref))}${embedThemeQuery(theme, mode)}" title="Burnfolio token burn" style="width:100%;max-width:760px;height:220px;border:0;border-radius:8px;overflow:hidden"></iframe>');`, {
     headers: { "Content-Type": "application/javascript; charset=utf-8" },
   });
 }
@@ -1382,6 +1394,7 @@ async function uniqueAccountNumber(env) {
 function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { users: 0, orgs: 0 }) {
   const globalTotal = formatCompact(global.total_tokens);
   const globalSubtitle = `${formatInt(global.last_year_tokens)} tokens burned globally`;
+  const showSocialProof = counts.users >= 50;
   return layout("Burnfolio — Show your burn", `
     <main class="landing">
       <section class="hero">
@@ -1395,22 +1408,18 @@ function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { us
             ? `<a class="button" href="/app">Open dashboard</a>`
             : `<a class="button" href="/signup">Create your graph</a><a class="button secondary" href="/signin">Sign in</a>`}
         </div>
-        <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine.</p>
+        <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine. <a href="/raghavsood">See an example profile</a>.</p>
         </div>
         <section class="showcase">
           <div class="showcase-top">
             <div><span>Global burn graph</span><strong>${esc(globalTotal)} tokens burned</strong></div>
-            <div class="showcase-counts" aria-label="Burnfolio account counts">
-              <span>${faIcon("user")} ${formatInt(counts.users)} users</span>
-              <span>${faIcon("org")} ${formatInt(counts.orgs)} orgs</span>
-            </div>
+            ${showSocialProof ? `<div class="showcase-counts" aria-label="Burnfolio account counts">
+              <span>${faIcon("user")} ${formatInt(counts.users)} ${counts.users === 1 ? "user" : "users"}</span>
+              <span>${faIcon("org")} ${formatInt(counts.orgs)} ${counts.orgs === 1 ? "org" : "orgs"}</span>
+            </div>` : ""}
           </div>
           ${heatmap(global.days, { title: "Past year", subtitle: globalSubtitle })}
-          <div class="steps">
-            <span>Create a profile</span>
-            <span>Run <code>pyro</code></span>
-            <span>Share the graph</span>
-          </div>
+          ${landingSteps()}
         </section>
       </section>
     </main>
@@ -1421,6 +1430,15 @@ function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { us
     canonical: "https://burnfolio.ai/",
     signedIn: isSignedIn,
   });
+}
+
+function landingSteps() {
+  const installCmd = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash";
+  return `<ol class="steps">
+    <li><span class="step-index">1</span><div><strong>Create your graph</strong><p>Claim a profile in seconds. No password, just an email magic link.</p><a class="button secondary" href="/signup">Create your graph</a></div></li>
+    <li><span class="step-index">2</span><div><strong>Run pyro</strong><p>One command installs the local collector and starts syncing your daily token counts.</p><div class="snippet"><div><span>Install command</span><button type="button" class="secondary copy" data-copy="${esc(installCmd)}">Copy</button></div><code>${esc(installCmd)}</code></div></div></li>
+    <li><span class="step-index">3</span><div><strong>Share the graph</strong><p>Drop a live embed in your GitHub README, or link your public profile anywhere.</p></div></li>
+  </ol>`;
 }
 
 function authPage(mode = "signup") {
@@ -1745,7 +1763,7 @@ function profileHtml(profile, isSignedIn = false) {
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
       </section>
       ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
-      ${heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" })}
+      ${heatmapYears(profile.days).length > 1 ? heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" }) : ""}
       <details class="embed-disclosure">
         <summary>Embed this graph</summary>
         ${embedThemePanel(name)}
@@ -1805,49 +1823,62 @@ function shareDialog(imageURL, text) {
 }
 
 const EMBED_THEMES = ["orange", "green", "blue"];
+const EMBED_MODES = ["dark", "light"];
 
 function embedThemePanel(name) {
-  const snippets = {};
+  const variants = {};
   for (const theme of EMBED_THEMES) {
-    const suffix = embedThemeQuery(theme);
-    snippets[theme] = {
-      script: `<script src="https://burnfolio.ai/embed/${name}/script.js${suffix}"></script>`,
-      svg: `<img src="https://burnfolio.ai/embed/${name}.svg${suffix}" alt="Burnfolio token burn graph">`,
-      markdown: `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg${suffix})](https://burnfolio.ai/${name})`,
-    };
+    for (const mode of EMBED_MODES) {
+      const suffix = embedThemeQuery(theme, mode);
+      variants[`${theme}-${mode}`] = {
+        script: `<script src="https://burnfolio.ai/embed/${name}/script.js${suffix}"></script>`,
+        svg: `<img src="https://burnfolio.ai/embed/${name}.svg${suffix}" alt="Burnfolio token burn graph">`,
+        markdown: `[![Burnfolio token burn graph](https://burnfolio.ai/embed/${name}.svg${suffix})](https://burnfolio.ai/${name})`,
+      };
+    }
   }
   return `<div class="embed-panel" data-embed-panel>
-    <div class="embed-theme-tabs" role="tablist" aria-label="Embed theme">
+    <div class="embed-theme-tabs" role="tablist" aria-label="Embed color theme">
       ${EMBED_THEMES.map((theme) => `<button type="button" class="theme-tab${theme === "orange" ? " active" : ""}" role="tab" aria-selected="${theme === "orange" ? "true" : "false"}" data-embed-theme="${theme}">${esc(theme)}</button>`).join("")}
     </div>
+    <div class="embed-theme-tabs" role="tablist" aria-label="Embed background">
+      ${EMBED_MODES.map((mode) => `<button type="button" class="theme-tab${mode === "dark" ? " active" : ""}" role="tab" aria-selected="${mode === "dark" ? "true" : "false"}" data-embed-mode="${mode}">${esc(mode)}</button>`).join("")}
+    </div>
     <div class="snippets">
-      ${themeSnippet("Iframe script", snippets, "script")}
-      ${themeSnippet("Static SVG", snippets, "svg")}
-      ${themeSnippet("GitHub Markdown", snippets, "markdown")}
+      ${embedSnippet("Iframe script", variants, "script")}
+      ${embedSnippet("Static SVG", variants, "svg")}
+      ${embedSnippet("GitHub Markdown", variants, "markdown")}
     </div>
   </div>`;
 }
 
-function themeSnippet(label, snippets, key) {
-  const attrs = EMBED_THEMES.map((theme) => `data-${theme}="${esc(snippets[theme][key])}"`).join(" ");
-  const initial = snippets.orange[key];
+function embedSnippet(label, variants, key) {
+  const attrs = Object.entries(variants).map(([variant, snippet]) => `data-variant-${variant}="${esc(snippet[key])}"`).join(" ");
+  const initial = variants["orange-dark"][key];
   return `<div class="snippet" data-theme-snippet><div><span>${esc(label)}</span><button type="button" class="secondary copy" data-copy="${esc(initial)}">Copy</button></div><code ${attrs}>${esc(initial)}</code></div>`;
 }
 
-function embedHtml(profile, theme = "orange") {
+function embedHtml(profile, theme = "orange", mode = "dark") {
   const name = profile.account.handle || profile.account.account_number;
   const scale = heatmapScale(profile.days);
-  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="embed theme-${esc(theme)}"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days`, scale })}</div><script>${globalScript()}</script>`;
+  const classes = `embed theme-${esc(theme)}${mode === "light" ? " mode-light" : ""}`;
+  return `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css()}</style><div class="${classes}"><div><strong>${esc(name)}</strong><span>${formatInt(profile.total_tokens)} tokens</span></div>${heatmap(profile.days, { compact: true, subtitle: `${formatInt(profile.stats.active_days)} active days`, scale })}</div><script>${globalScript()}</script>`;
 }
 
-function svgEmbed(profile, theme = "orange") {
+function svgEmbed(profile, theme = "orange", mode = "dark") {
   const name = profile.account.handle || profile.account.account_number;
   const cells = heatmapCellData(profile.days, heatmapScale(profile.days));
   const cellSize = 10;
   const gap = 4;
   const left = 22;
   const top = 62;
-  const colors = embedPalette(theme);
+  const colors = embedPalette(theme, mode);
+  const isLight = mode === "light";
+  const bg = isLight ? "#FFFCF7" : "#1C140D";
+  const border = isLight ? "#EEDDCB" : "#3A2A1B";
+  const titleColor = isLight ? "#211405" : "#FBF1E6";
+  const mutedColor = isLight ? "#6F5F4D" : "#BBA68E";
+  const brandColor = isLight ? "#C2400A" : "#FF8A3D";
   const columns = Math.ceil(cells.length / 7);
   const gridWidth = columns * cellSize + Math.max(0, columns - 1) * gap;
   const gridBottom = top + 7 * cellSize + 6 * gap;
@@ -1861,19 +1892,19 @@ function svgEmbed(profile, theme = "orange") {
   const width = left * 2 + gridWidth;
   const height = footerBaseline + 22;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(name)} Burnfolio token burn graph">
-  <rect width="100%" height="100%" rx="8" fill="#1C140D"/>
-  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="#3A2A1B"/>
-  <text x="22" y="30" fill="#FBF1E6" font-family="Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
-  <text x="22" y="50" fill="#BBA68E" font-family="Space Mono, ui-monospace, monospace" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active days</text>
+  <rect width="100%" height="100%" rx="8" fill="${bg}"/>
+  <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="8" fill="none" stroke="${border}"/>
+  <text x="22" y="30" fill="${titleColor}" font-family="Bricolage Grotesque, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">${esc(name)}</text>
+  <text x="22" y="50" fill="${mutedColor}" font-family="Space Mono, ui-monospace, monospace" font-size="12">${formatInt(profile.total_tokens)} tokens burned · ${formatInt(profile.stats.active_days)} active days</text>
   ${rects}
-  <text x="22" y="${footerBaseline}" fill="#FF8A3D" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700">burnfolio.ai</text>
-  <text x="${legendX}" y="${footerBaseline}" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
+  <text x="22" y="${footerBaseline}" fill="${brandColor}" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700">burnfolio.ai</text>
+  <text x="${legendX}" y="${footerBaseline}" fill="${mutedColor}" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">Less</text>
   <rect x="${legendX + 33}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[0]}"/>
   <rect x="${legendX + 48}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[1]}"/>
   <rect x="${legendX + 63}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[2]}"/>
   <rect x="${legendX + 78}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[3]}"/>
   <rect x="${legendX + 93}" y="${footerBaseline - 9}" width="10" height="10" rx="2" fill="${colors[4]}"/>
-  <text x="${legendX + 110}" y="${footerBaseline}" fill="#BBA68E" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
+  <text x="${legendX + 110}" y="${footerBaseline}" fill="${mutedColor}" font-family="Plus Jakarta Sans, ui-sans-serif, system-ui, sans-serif" font-size="11">More</text>
 </svg>`;
 }
 
@@ -2239,6 +2270,42 @@ function howWeCountPage(isSignedIn = false) {
   });
 }
 
+function privacyPage(isSignedIn = false) {
+  return layout("Privacy — Burnfolio", `
+    <main class="learn-page">
+      <header class="learn-hero">
+        <p class="eyebrow">Legal</p>
+        <h1>Privacy</h1>
+        <p class="lede">Burnfolio is a counts-only product. This page is a short, honest explanation of what that means.</p>
+      </header>
+      <section class="learn-grid">
+        <article class="learn-card">
+          <h2>What we collect</h2>
+          <p>Per synced day, per machine or OpenRouter connection: the date, input tokens, cache read tokens, cache write tokens, output tokens, reasoning tokens, and a request count.</p>
+          <p>Account data: an account number and key, an optional email address (for magic-link sign-in and recovery), an optional handle, and any bio or profile links you choose to add.</p>
+          <p>If you connect OpenRouter, we store the management key encrypted at rest. <code>pyro</code> itself only ever sends us a hash of your OpenRouter key, never the key itself.</p>
+        </article>
+        <article class="learn-card">
+          <h2>What we never collect</h2>
+          <p>Prompts, generated code, transcripts, file contents, message bodies, file paths, or session identifiers never leave your machine. <code>pyro</code> reads local usage records and reports token counts only.</p>
+        </article>
+        <article class="learn-card">
+          <h2>Cookies</h2>
+          <p>One session cookie, used only to keep you signed in. We don't run third-party trackers or ad pixels. Cloudflare, our hosting provider, collects standard aggregate web analytics for the site.</p>
+        </article>
+        <article class="learn-card">
+          <h2>Data deletion</h2>
+          <p>We don't have self-serve account deletion yet. Open an issue on <a href="https://github.com/nbitslabs/burnfolio" rel="noopener noreferrer" target="_blank">GitHub</a> and we'll delete your account and usage data.</p>
+        </article>
+      </section>
+    </main>
+  `, {
+    description: "What Burnfolio collects, what it never collects, and how to request deletion.",
+    canonical: "https://burnfolio.ai/privacy",
+    signedIn: isSignedIn,
+  });
+}
+
 function layout(title, body, meta = {}) {
   const description = meta.description || "Burnfolio turns your AI token burn into a contribution graph worth sharing.";
   const canonical = meta.canonical || "https://burnfolio.ai";
@@ -2270,7 +2337,19 @@ function layout(title, body, meta = {}) {
 <meta name="twitter:title" content="${esc(title)}">
 <meta name="twitter:description" content="${esc(description)}">
 <meta name="twitter:image" content="${esc(image)}">
-<style>${css()}</style></head><body><nav><a class="nav-brand" href="/"><img src="/assets/logo.svg" alt="" width="28" height="28"><span>Burnfolio</span></a><div class="nav-links">${navLinks}</div></nav>${body}<script>${globalScript()}</script></body></html>`;
+<style>${css()}</style></head><body><nav><a class="nav-brand" href="/"><img src="/assets/logo.svg" alt="" width="28" height="28"><span>Burnfolio</span></a><div class="nav-links">${navLinks}</div></nav>${body}${siteFooter()}<script>${globalScript()}</script></body></html>`;
+}
+
+function siteFooter() {
+  const year = new Date().getUTCFullYear();
+  return `<footer class="site-footer">
+    <div class="site-footer-links">
+      <a href="https://github.com/nbitslabs/burnfolio" rel="noopener noreferrer" target="_blank">GitHub</a>
+      <a href="/how-we-count">How we count</a>
+      <a href="/privacy">Privacy</a>
+    </div>
+    <p>&copy; ${year} Burnfolio</p>
+  </footer>`;
 }
 
 function heatmap(days, options = {}) {
@@ -3216,6 +3295,13 @@ function orgManagementScript() {
 
 function globalScript() {
   return `
+    function scrollHeatmapsToNow(root) {
+      (root || document).querySelectorAll(".heatmap-scroll").forEach((el) => {
+        if (el.offsetParent === null) return;
+        el.scrollLeft = el.scrollWidth;
+      });
+    }
+    requestAnimationFrame(() => scrollHeatmapsToNow());
     function shareStatus(message) {
       const out = document.querySelector("[data-share-result]");
       if (!out) return;
@@ -3235,25 +3321,39 @@ function globalScript() {
         setTimeout(() => button.textContent = "Copy", 1200);
       });
     });
-    document.querySelectorAll("[data-embed-theme]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const panel = button.closest("[data-embed-panel]");
-        if (!panel) return;
-        const theme = button.dataset.embedTheme || "orange";
-        panel.querySelectorAll("[data-embed-theme]").forEach((tab) => {
-          const active = tab === button;
-          tab.classList.toggle("active", active);
-          tab.setAttribute("aria-selected", active ? "true" : "false");
-        });
+    document.querySelectorAll("[data-embed-panel]").forEach((panel) => {
+      function applyEmbedVariant() {
+        const theme = panel.querySelector("[data-embed-theme].active")?.dataset.embedTheme || "orange";
+        const mode = panel.querySelector("[data-embed-mode].active")?.dataset.embedMode || "dark";
         panel.querySelectorAll("[data-theme-snippet]").forEach((snippet) => {
           const code = snippet.querySelector("code");
           const copy = snippet.querySelector("[data-copy]");
-          const next = code?.dataset?.[theme] || code?.dataset?.orange || "";
+          const next = code?.getAttribute("data-variant-" + theme + "-" + mode) || code?.getAttribute("data-variant-orange-dark") || "";
           if (code) code.textContent = next;
           if (copy) {
             copy.dataset.copy = next;
             copy.textContent = "Copy";
           }
+        });
+      }
+      panel.querySelectorAll("[data-embed-theme]").forEach((button) => {
+        button.addEventListener("click", () => {
+          panel.querySelectorAll("[data-embed-theme]").forEach((tab) => {
+            const active = tab === button;
+            tab.classList.toggle("active", active);
+            tab.setAttribute("aria-selected", active ? "true" : "false");
+          });
+          applyEmbedVariant();
+        });
+      });
+      panel.querySelectorAll("[data-embed-mode]").forEach((button) => {
+        button.addEventListener("click", () => {
+          panel.querySelectorAll("[data-embed-mode]").forEach((tab) => {
+            const active = tab === button;
+            tab.classList.toggle("active", active);
+            tab.setAttribute("aria-selected", active ? "true" : "false");
+          });
+          applyEmbedVariant();
         });
       });
     });
@@ -3335,6 +3435,7 @@ function globalScript() {
           item.classList.toggle("active", active);
           item.setAttribute("aria-pressed", active ? "true" : "false");
         });
+        requestAnimationFrame(() => scrollHeatmapsToNow());
       });
     });
   `;
@@ -3539,6 +3640,11 @@ function cleanTheme(value) {
   return EMBED_THEMES.includes(value) ? value : "orange";
 }
 
+function cleanMode(value) {
+  value = String(value || "").trim().toLowerCase();
+  return EMBED_MODES.includes(value) ? value : "dark";
+}
+
 function cleanProfileMetadata(body) {
   const fields = {};
   if ("bio" in body) fields.bio = cleanText(body.bio, 280);
@@ -3621,17 +3727,27 @@ function socialPathLabel(value, fallback) {
   }
 }
 
-function embedThemeQuery(theme) {
+function embedThemeQuery(theme, mode = "dark") {
   theme = cleanTheme(theme);
-  return theme === "orange" ? "" : `?theme=${theme}`;
+  mode = cleanMode(mode);
+  const params = [];
+  if (theme !== "orange") params.push(`theme=${theme}`);
+  if (mode !== "dark") params.push(`mode=${mode}`);
+  return params.length ? `?${params.join("&")}` : "";
 }
 
-function embedPalette(theme) {
-  const palettes = {
+function embedPalette(theme, mode = "dark") {
+  const darkPalettes = {
     orange: ["#2A2017", "#7A3D12", "#C0590F", "#F2611C", "#FF8A3D"],
     green: ["#18251B", "#1F5D35", "#2F8C4C", "#48B86A", "#8CE99A"],
     blue: ["#172235", "#214D7A", "#2E7BC4", "#4AA3FF", "#9BD1FF"],
   };
+  const lightPalettes = {
+    orange: ["#F2E7D9", "#FBD089", "#F99B3C", "#F2611C", "#D6300B"],
+    green: ["#E4F3E8", "#B8E4C4", "#6FC98A", "#2F8C4C", "#1F5D35"],
+    blue: ["#E4EEFB", "#BBDBFA", "#6FB3F5", "#2E7BC4", "#173F73"],
+  };
+  const palettes = cleanMode(mode) === "light" ? lightPalettes : darkPalettes;
   return palettes[cleanTheme(theme)] || palettes.orange;
 }
 
