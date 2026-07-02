@@ -54,6 +54,7 @@ export default {
   },
   async scheduled(event, env, ctx) {
     ctx.waitUntil(syncDueOpenRouterConnections(env));
+    ctx.waitUntil(cleanupExpiredRecords(env));
   },
 };
 
@@ -80,7 +81,8 @@ async function route(request, env) {
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
   if (path === "/api/account-login" && request.method === "POST") return accountLogin(request, env);
   if (path === "/api/magic-links" && request.method === "POST") return requestMagicLink(request, env);
-  if (path === "/auth/magic") return consumeMagicLink(request, env);
+  if (path === "/auth/magic" && (request.method === "GET" || request.method === "HEAD")) return magicLinkConfirmPage(request, env);
+  if (path === "/auth/magic" && request.method === "POST") return consumeMagicLink(request, env);
   if (path === "/api/email" && request.method === "POST") return attachEmail(request, env);
   if (path === "/api/logout" && request.method === "POST") return logout(request, env);
   if (path === "/api/me") return me(request, env);
@@ -176,19 +178,14 @@ async function requestMagicLink(request, env) {
   ]);
   if (limited) return limited;
 
-  let user = await userByVerifiedEmail(env, email);
-  if (!user) {
-    const created = await createUser(env, { email: "", handle: "" });
-    if (created.error) return json(created, created.status || 400);
-    user = { id: created.id };
-  }
+  const existing = await userByVerifiedEmail(env, email);
 
   const token = randomToken("bfl");
   const tokenHash = await sha256(token);
   await env.DB.prepare(`
     INSERT INTO magic_links (token_hash, user_id, email, expires_at, purpose)
     VALUES (?, ?, ?, datetime('now', '+15 minutes'), 'login')
-  `).bind(tokenHash, user.id, email).run();
+  `).bind(tokenHash, existing ? existing.id : null, email).run();
 
   const origin = new URL(request.url).origin;
   const link = `${origin}/auth/magic?token=${encodeURIComponent(token)}`;
@@ -236,8 +233,29 @@ async function logout(request, env) {
   });
 }
 
-async function consumeMagicLink(request, env) {
+async function magicLinkConfirmPage(request, env) {
   const token = new URL(request.url).searchParams.get("token") || "";
+  if (!token) return html(authResultPage("Missing sign-in token.", false), 400);
+  return html(magicLinkConfirmHtml(token));
+}
+
+function magicLinkConfirmHtml(token) {
+  return layout("Confirm sign-in — Burnfolio", `
+    <main class="profile">
+      <p class="eyebrow">Almost there</p>
+      <h1>Confirm your sign-in</h1>
+      <p class="lede">Click continue to finish signing in to Burnfolio. This extra step keeps email scanners and link previews from signing in on your behalf.</p>
+      <form method="POST" action="/auth/magic">
+        <input type="hidden" name="token" value="${esc(token)}">
+        <button class="button" type="submit">Continue to sign in</button>
+      </form>
+    </main>
+  `);
+}
+
+async function consumeMagicLink(request, env) {
+  const body = await readBody(request);
+  const token = String(body.token || "").trim();
   if (!token) return html(authResultPage("Missing sign-in token.", false), 400);
   const tokenHash = await sha256(token);
   const row = await env.DB.prepare(`
@@ -259,7 +277,13 @@ async function consumeMagicLink(request, env) {
     }
   } else {
     const existing = await userByVerifiedEmail(env, row.email);
-    if (existing) targetUserID = existing.id;
+    if (existing) {
+      targetUserID = existing.id;
+    } else if (!targetUserID) {
+      const created = await createUser(env, { email: "", handle: "" });
+      if (created.error) return html(authResultPage("Could not create your profile. Try again.", false), 400);
+      targetUserID = created.id;
+    }
   }
 
   await verifyEmailForUser(env, targetUserID, row.email);
@@ -270,6 +294,7 @@ async function consumeMagicLink(request, env) {
   return new Response(authResultPage("Signed in. Redirecting to your dashboard.", true), {
     status: 200,
     headers: {
+      ...securityHeaders(CSP_DEFAULT),
       "Content-Type": "text/html; charset=utf-8",
       "Set-Cookie": cookie(sessionToken),
       "Refresh": "1; url=/app",
@@ -428,8 +453,8 @@ async function rotateMachineTokenRoute(request, env, machineNumber) {
   if (!machine) return json({ error: "machine_not_found" }, 404);
 
   const token = randomToken("bfm");
-  await env.DB.prepare("UPDATE machines SET token_hash = ?, token = ? WHERE id = ?")
-    .bind(await sha256(token), token, machine.id).run();
+  await env.DB.prepare("UPDATE machines SET token_hash = ? WHERE id = ?")
+    .bind(await sha256(token), machine.id).run();
   const profile = machine.org_id
     ? machine.org_handle || machine.org_account_number
     : machine.user_handle || machine.user_account_number;
@@ -759,6 +784,18 @@ async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, mac
   return { upsertedDays: statements.length, skippedDays };
 }
 
+async function cleanupExpiredRecords(env) {
+  try {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM magic_links WHERE consumed_at IS NOT NULL OR expires_at <= datetime('now')"),
+      env.DB.prepare("DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')"),
+      env.DB.prepare("DELETE FROM rate_limits WHERE updated_at <= datetime('now', '-2 days')"),
+    ]);
+  } catch (error) {
+    console.error("cleanup cron failed", error && error.message ? error.message : error);
+  }
+}
+
 async function syncDueOpenRouterConnections(env) {
   const rows = await env.DB.prepare(`
     SELECT *
@@ -959,8 +996,8 @@ async function ogProfilePNGPage(env, ref) {
 
 async function embedPage(request, env, ref) {
   const profile = await buildProfile(env, ref);
-  if (!profile) return html(notFoundPage(), 404);
-  return html(embedHtml(profile, cleanTheme(new URL(request.url).searchParams.get("theme"))));
+  if (!profile) return html(notFoundPage(), 404, { embed: true });
+  return html(embedHtml(profile, cleanTheme(new URL(request.url).searchParams.get("theme"))), 200, { embed: true });
 }
 
 async function embedSVGPage(request, env, ref) {
@@ -1089,8 +1126,8 @@ async function createMachine(env, { userID, name, orgID = "", profileRef = "" })
   const id = crypto.randomUUID();
   const machineNumber = "m_" + randomBase36(10);
   const token = randomToken("bfm");
-  await env.DB.prepare("INSERT INTO machines (id, user_id, org_id, machine_number, name, token_hash, token) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, userID, orgID || null, machineNumber, cleanText(name, 80), await sha256(token), token).run();
+  await env.DB.prepare("INSERT INTO machines (id, user_id, org_id, machine_number, name, token_hash) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(id, userID, orgID || null, machineNumber, cleanText(name, 80), await sha256(token)).run();
   return { machine_number: machineNumber, name: cleanText(name, 80), token, profile: profileRef };
 }
 
@@ -1101,7 +1138,6 @@ async function machineRows(env, userID) {
       m.name,
       m.created_at,
       m.last_seen_at,
-      m.token,
       m.org_id,
       oa.account_number AS org_account_number,
       oh.handle AS org_handle,
@@ -1557,9 +1593,7 @@ function orgMemberRow(org, member, canManage) {
 function machineRow(machine, fallbackProfileRef) {
   const profileRef = machine.org_handle || machine.org_account_number || fallbackProfileRef;
   const scope = machine.org_id ? `org ${machine.org_display_name || profileRef}` : "personal profile";
-  const action = machine.token
-    ? `<button type="button" class="secondary copy" data-copy="${esc(installCommand(profileRef, machine.token))}">Copy install</button>`
-    : `<button type="button" class="secondary copy" data-refresh-machine="${esc(machine.machine_number)}">Generate token + copy</button><span class="row-note">Creates a replacement token for this machine.</span>`;
+  const action = `<button type="button" class="secondary copy" data-refresh-machine="${esc(machine.machine_number)}">Rotate token</button><span class="row-note">Reveals a fresh install command once. The previous token stops working.</span>`;
   return `<div class="row machine-row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
 }
 
@@ -1571,10 +1605,6 @@ function orgRow(org) {
 function emailRow(row) {
   const state = row.verified_at ? "Verified" : "Pending verification";
   return `<div class="email-row"><div><strong>${esc(row.email)}</strong><span>${esc(state)}${row.is_primary ? " · primary" : ""}</span></div></div>`;
-}
-
-function installCommand(profile, machine) {
-  return `curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile ${profile} --machine ${machine}`;
 }
 
 function uninstallCommand() {
@@ -3203,7 +3233,7 @@ function tooLarge(request, maxBytes) {
 function rejectCrossOrigin(request, path) {
   if (!path.startsWith("/api/")) return null;
   if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return null;
-  if (path === "/api/ingest") return null;
+  if (path === "/api/ingest" || path === "/api/openrouter/ingest") return null;
   const origin = request.headers.get("Origin");
   if (!origin) return null;
   try {
@@ -3246,12 +3276,25 @@ async function hitRateLimit(env, key, limit, windowSeconds) {
   return int(row && row.count) <= limit;
 }
 
-function json(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...headers } });
+const CSP_SOURCES = "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://cloudflareinsights.com";
+const CSP_DEFAULT = `${CSP_SOURCES}; frame-ancestors 'none'`;
+const CSP_EMBED = `${CSP_SOURCES}; frame-ancestors *`;
+
+function securityHeaders(csp) {
+  const headers = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+  };
+  if (csp) headers["Content-Security-Policy"] = csp;
+  return headers;
 }
 
-function html(body, status = 200) {
-  return new Response(body, { status, headers: { "Content-Type": "text/html; charset=utf-8" } });
+function json(data, status = 200, headers = {}) {
+  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...securityHeaders(), ...headers } });
+}
+
+function html(body, status = 200, { embed = false } = {}) {
+  return new Response(body, { status, headers: { "Content-Type": "text/html; charset=utf-8", ...securityHeaders(embed ? CSP_EMBED : CSP_DEFAULT) } });
 }
 
 function redirect(location, status = 302) {
