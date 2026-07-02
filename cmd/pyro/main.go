@@ -103,7 +103,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	cfg, _ := loadConfig(defaultHome)
+	cfg := loadConfigOrWarn(defaultHome)
 	if !providersProvided && cfg.Providers != "" {
 		providers = cfg.Providers
 	}
@@ -155,6 +155,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "sync requires both -profile and -machine")
 			os.Exit(2)
 		}
+		// A one-off "pyro -profile x -machine y" run (as opposed to `pyro
+		// install`) still persists these credentials to config.json below
+		// so future runs sync automatically. Note that the first time it
+		// happens, so it's not a silent, surprising side effect.
+		hadCredentials := credentialsAlreadySaved(cfg)
 		result, err := syncReport(context.Background(), server, profile, machine, report)
 		if err != nil {
 			cfg.LastSyncAt = time.Now().UTC().Format(time.RFC3339)
@@ -172,6 +177,9 @@ func main() {
 		cfg.LastSyncStatus = syncStatus(result)
 		cfg.LastPyroVersion = version
 		_ = saveConfig(defaultHome, cfg)
+		if !hadCredentials {
+			fmt.Printf("Saved profile + machine token to %s (pyro will sync automatically; run 'pyro uninstall' to remove).\n", configPath(defaultHome))
+		}
 		if result.SkippedDays > 0 {
 			fmt.Printf("\nSynced %d days to %s for %s. Skipped %d invalid days.\n", result.UpsertedDays, strings.TrimRight(server, "/"), profile, result.SkippedDays)
 		} else {
@@ -327,7 +335,7 @@ func installCmd(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	home, _ := os.UserHomeDir()
-	cfg, _ := loadConfig(home)
+	cfg := loadConfigOrWarn(home)
 	profile := fs.String("profile", cfg.Profile, "Burnfolio profile")
 	machine := fs.String("machine", cfg.Machine, "Burnfolio machine token")
 	server := fs.String("server", valueOr(cfg.Server, defaultServer()), "Burnfolio server URL")
@@ -370,7 +378,7 @@ func uninstallCmd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, _ := loadConfig(home)
+	cfg := loadConfigOrWarn(home)
 	if !*keepCron {
 		if err := removeCron(strings.TrimSpace(valueOr(*profile, cfg.Profile))); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not update crontab: %v\n", err)
@@ -395,7 +403,7 @@ func statusCmd(args []string) error {
 		return err
 	}
 	home, _ := os.UserHomeDir()
-	cfg, _ := loadConfig(home)
+	cfg := loadConfigOrWarn(home)
 	if *jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -430,9 +438,12 @@ func loadConfig(home string) (config, error) {
 			cfg.Providers = usage.DefaultProviderList()
 			return cfg, nil
 		}
+		cfg.Server = defaultServer()
+		cfg.Providers = usage.DefaultProviderList()
 		return cfg, err
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
+		cfg = config{Server: defaultServer(), Providers: usage.DefaultProviderList()}
 		return cfg, err
 	}
 	if cfg.Server == "" {
@@ -442,6 +453,27 @@ func loadConfig(home string) (config, error) {
 		cfg.Providers = usage.DefaultProviderList()
 	}
 	return cfg, nil
+}
+
+// loadConfigOrWarn loads the config, falling back to fresh-install defaults
+// on error. loadConfig only returns a non-nil error for an existing config
+// file that couldn't be read or parsed (a missing file is not an error), so
+// this is the "config exists but is broken" case: warn once on stderr
+// rather than silently proceeding as if pyro had never been configured.
+// credentialsAlreadySaved reports whether cfg already has both a profile
+// and machine token on disk, i.e. whether persisting new ones (from a
+// one-off "pyro -profile x -machine y" run) would be a no-op change rather
+// than the first time credentials are saved.
+func credentialsAlreadySaved(cfg config) bool {
+	return strings.TrimSpace(cfg.Profile) != "" && strings.TrimSpace(cfg.Machine) != ""
+}
+
+func loadConfigOrWarn(home string) config {
+	cfg, err := loadConfig(home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read %s (%v); continuing with defaults\n", configPath(home), err)
+	}
+	return cfg
 }
 
 func saveConfig(home string, cfg config) error {

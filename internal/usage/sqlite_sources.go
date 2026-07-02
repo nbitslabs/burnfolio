@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -152,6 +153,44 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
+// tableColumnSet returns the set of column names present on table, via
+// PRAGMA table_info. Returns an empty set (never an error) so callers can
+// treat "column not found" and "couldn't inspect the schema" the same way:
+// fall back to a known-good column.
+func tableColumnSet(db *sql.DB, table string) map[string]bool {
+	cols := map[string]bool{}
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return cols
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			continue
+		}
+		cols[name] = true
+	}
+	return cols
+}
+
+// pickTimeColumn chooses the best available timestamp column for date
+// bucketing: the first candidate (in priority order) that's actually
+// present in cols, or fallback if none of them are. Every candidate string
+// here is a fixed literal from our own preferred-column lists (never
+// derived from user/DB-controlled input), so building SQL with the result
+// is safe.
+func pickTimeColumn(cols map[string]bool, preferred []string, fallback string) string {
+	for _, candidate := range preferred {
+		if cols[candidate] {
+			return candidate
+		}
+	}
+	return fallback
+}
+
 func readHermesDB(path string) ([]Event, error) {
 	db, cleanup, err := openReadOnlyDB(path)
 	if err != nil {
@@ -159,13 +198,23 @@ func readHermesDB(path string) ([]Event, error) {
 	}
 	defer cleanup()
 	defer db.Close()
-	rows, err := db.Query(`
-		SELECT id, model, billing_provider, started_at, message_count,
+
+	// A session's single started_at timestamp attributes every token in a
+	// long-running or multi-day session entirely to the day it started,
+	// and a still-open session keeps re-attributing new usage to that
+	// stale day. Prefer a last-activity/updated timestamp when the schema
+	// has one, since it converges once the session settles.
+	timeColumn := pickTimeColumn(tableColumnSet(db, "sessions"),
+		[]string{"updated_at", "last_activity_at", "last_message_at", "ended_at", "completed_at", "finished_at"},
+		"started_at")
+
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT id, model, billing_provider, %s, message_count,
 		       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
 		       reasoning_tokens, estimated_cost_usd, actual_cost_usd
 		FROM sessions
 		WHERE model IS NOT NULL AND TRIM(model) != ''
-	`)
+	`, timeColumn))
 	if err != nil {
 		return nil, err
 	}
@@ -173,17 +222,17 @@ func readHermesDB(path string) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var id, model, provider sql.NullString
-		var started any
+		var eventTime any
 		var messageCount, input, output, cacheRead, cacheWrite, reasoning sql.NullInt64
 		var estimated, actual sql.NullFloat64
-		if err := rows.Scan(&id, &model, &provider, &started, &messageCount, &input, &output, &cacheRead, &cacheWrite, &reasoning, &estimated, &actual); err != nil {
+		if err := rows.Scan(&id, &model, &provider, &eventTime, &messageCount, &input, &output, &cacheRead, &cacheWrite, &reasoning, &estimated, &actual); err != nil {
 			continue
 		}
 		cost := estimated.Float64
 		if actual.Valid {
 			cost = actual.Float64
 		}
-		ts := parseAnyTime(started)
+		ts := parseAnyTime(eventTime)
 		event, ok := eventFromUsage(path, "hermes", provider.String, model.String, id.String, ts, TokenUsage{
 			Input:      nullInt(input),
 			Output:     nullInt(output),
@@ -205,22 +254,31 @@ func readGooseDB(path string) ([]Event, error) {
 	}
 	defer cleanup()
 	defer db.Close()
-	rows, err := db.Query(`
-		SELECT id, model_config_json, provider_name, created_at,
+
+	// Same reasoning as Hermes above: prefer a last-activity/updated
+	// timestamp over created_at when the schema has one, so long-running
+	// and multi-day sessions bucket to a stable day instead of piling
+	// everything onto the day the session started.
+	timeColumn := pickTimeColumn(tableColumnSet(db, "sessions"),
+		[]string{"updated_at", "last_activity_at", "ended_at"},
+		"created_at")
+
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT id, model_config_json, provider_name, %s,
 		       total_tokens, input_tokens, output_tokens,
 		       accumulated_total_tokens, accumulated_input_tokens, accumulated_output_tokens
 		FROM sessions
 		WHERE model_config_json IS NOT NULL AND TRIM(model_config_json) != ''
-	`)
+	`, timeColumn))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var events []Event
 	for rows.Next() {
-		var id, modelConfig, provider, created sql.NullString
+		var id, modelConfig, provider, eventTime sql.NullString
 		var total, input, output, accTotal, accInput, accOutput sql.NullInt64
-		if err := rows.Scan(&id, &modelConfig, &provider, &created, &total, &input, &output, &accTotal, &accInput, &accOutput); err != nil {
+		if err := rows.Scan(&id, &modelConfig, &provider, &eventTime, &total, &input, &output, &accTotal, &accInput, &accOutput); err != nil {
 			continue
 		}
 		model := gooseModel(modelConfig.String)
@@ -234,7 +292,7 @@ func readGooseDB(path string) ([]Event, error) {
 		if t > i+o {
 			reasoning = t - i - o
 		}
-		event, ok := eventFromUsage(path, "goose", provider.String, model, id.String, parseAnyTime(created.String), TokenUsage{
+		event, ok := eventFromUsage(path, "goose", provider.String, model, id.String, parseAnyTime(eventTime.String), TokenUsage{
 			Input:     i,
 			Output:    o,
 			Reasoning: reasoning,

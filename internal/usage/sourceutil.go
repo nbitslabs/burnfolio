@@ -4,9 +4,9 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -96,25 +96,32 @@ func parseFlexibleTime(raw string) *time.Time {
 	if i, err := parseInt(raw); err == nil {
 		return unixNumberTime(i)
 	}
-	layouts := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
-		"2006-01-02",
-	}
-	for _, layout := range layouts {
+	// Zoned layouts carry their own offset, so parse them as-is.
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, raw); err == nil {
+			return &t
+		}
+	}
+	// Zone-less layouts: several sources (e.g. Goose's created_at/
+	// updated_at) store local wall-clock time here, not UTC. Parsing them
+	// with time.Parse implicitly assumes UTC, which shifts day-bucketing
+	// by the machine's UTC offset. Parse in the local zone instead.
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, raw, time.Local); err == nil {
 			return &t
 		}
 	}
 	return nil
 }
 
+// parseInt parses raw as a base-10 integer, requiring the whole string to
+// be consumed. (fmt.Sscanf("%d", ...) would previously accept a digit
+// *prefix* of an arbitrary string — e.g. "2026-01-05T00:00:00Z" scanned as
+// the integer 2026 — which silently corrupted any RFC3339 timestamp routed
+// through this function into a near-epoch date. strconv.ParseInt has no
+// such partial-match behavior.)
 func parseInt(raw string) (int64, error) {
-	var value int64
-	_, err := fmt.Sscanf(raw, "%d", &value)
-	return value, err
+	return strconv.ParseInt(raw, 10, 64)
 }
 
 func unixNumberTime(value int64) *time.Time {

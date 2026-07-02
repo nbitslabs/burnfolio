@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 )
 
@@ -9,6 +10,12 @@ func collectOpenCode(ctx context.Context, opts Options) ([]Event, []string, erro
 	var events []Event
 	var warnings []string
 	var parseErrors int
+	// Both ~/.local/share/opencode and ~/.config/opencode are scanned, and
+	// on some setups they (or files within them) are symlinked or copied
+	// into each other. Dedup on a stable event identity so the same
+	// message/part is never double-counted just because it's reachable
+	// from two roots.
+	seen := map[string]bool{}
 
 	for _, root := range opencodeRoots(opts.HomeDir) {
 		err := walkFiles(root, func(path string) bool {
@@ -20,12 +27,23 @@ func collectOpenCode(ctx context.Context, opts Options) ([]Event, []string, erro
 			default:
 			}
 
+			rel := path
+			if r, relErr := filepath.Rel(root, path); relErr == nil {
+				rel = r
+			}
+
 			if hasExt(path, ".jsonl") {
-				err := readJSONL(path, func(_ int, obj object) error {
+				err := readJSONL(path, func(line int, obj object) error {
 					event, ok := parseOpenCodeEvent(path, obj)
-					if ok {
-						events = append(events, event)
+					if !ok {
+						return nil
 					}
+					key := opencodeDedupeKey(obj, rel, line)
+					if seen[key] {
+						return nil
+					}
+					seen[key] = true
+					events = append(events, event)
 					return nil
 				})
 				if err != nil {
@@ -43,10 +61,15 @@ func collectOpenCode(ctx context.Context, opts Options) ([]Event, []string, erro
 				if parseErrors <= opts.MaxErrors {
 					warnings = append(warnings, err.Error())
 				}
+				return nil
 			}
 			event, ok := parseOpenCodeEvent(path, obj)
 			if ok {
-				events = append(events, event)
+				key := opencodeDedupeKey(obj, rel, 0)
+				if !seen[key] {
+					seen[key] = true
+					events = append(events, event)
+				}
 			}
 			return nil
 		})
@@ -59,6 +82,27 @@ func collectOpenCode(ctx context.Context, opts Options) ([]Event, []string, erro
 		warnings = append(warnings, "opencode: additional parse errors suppressed")
 	}
 	return events, warnings, nil
+}
+
+// opencodeDedupeKey identifies a message/part record for dedup purposes,
+// preferring a stable ID from the parsed object over the file's path so the
+// same record reached via two different roots (e.g. one a symlink/copy of
+// the other) collapses to a single event. When no ID is present, it falls
+// back to the path relative to the scanned root plus the JSONL line number
+// (0 for standalone .json files), rather than the absolute source path,
+// since the absolute path differs across roots even for identical content.
+func opencodeDedupeKey(obj object, relPath string, line int) string {
+	id := firstString(obj,
+		[]string{"id"},
+		[]string{"messageID"},
+		[]string{"partID"},
+		[]string{"message", "id"},
+		[]string{"info", "id"},
+	)
+	if id != "" {
+		return dedupeKey("opencode", "id", id)
+	}
+	return dedupeKey("opencode", "path", relPath, fmt.Sprintf("%d", line))
 }
 
 func parseOpenCodeEvent(path string, obj object) (Event, bool) {
@@ -127,12 +171,32 @@ func parseOpenCodeEvent(path string, obj object) (Event, bool) {
 
 func opencodeRoots(home string) []string {
 	if dirs := envDirs("OPENCODE_DATA_DIR"); len(dirs) > 0 {
-		return dirs
+		return dedupeResolvedDirs(dirs)
 	}
-	return existingDirs(
+	return dedupeResolvedDirs(existingDirs(
 		filepath.Join(home, ".local", "share", "opencode"),
 		filepath.Join(home, ".config", "opencode"),
-	)
+	))
+}
+
+// dedupeResolvedDirs resolves symlinks in each directory so that two
+// configured roots which are really the same directory (one a symlink to
+// the other) collapse to a single entry instead of being walked twice.
+func dedupeResolvedDirs(dirs []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, dir := range dirs {
+		real := dir
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			real = resolved
+		}
+		if seen[real] {
+			continue
+		}
+		seen[real] = true
+		out = append(out, dir)
+	}
+	return out
 }
 
 func firstString(root object, paths ...[]string) string {

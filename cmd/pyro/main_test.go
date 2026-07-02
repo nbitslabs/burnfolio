@@ -4,12 +4,38 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nbitslabs/burnfolio/internal/usage"
 )
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// whatever was written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
 
 func TestSyncReportPostsDailyTotals(t *testing.T) {
 	var gotAuth string
@@ -91,6 +117,63 @@ func TestFlagSetProvided(t *testing.T) {
 	}
 	if flagSetProvided(fs, "machine") {
 		t.Fatal("did not expect machine to be marked as provided")
+	}
+}
+
+func TestLoadConfigOrWarnSilentWhenConfigMissing(t *testing.T) {
+	home := t.TempDir()
+	stderr := captureStderr(t, func() {
+		cfg := loadConfigOrWarn(home)
+		if cfg.Installed {
+			t.Fatalf("expected fresh-install defaults, got %#v", cfg)
+		}
+	})
+	if stderr != "" {
+		t.Fatalf("expected no warning for a missing config file, got %q", stderr)
+	}
+}
+
+func TestLoadConfigOrWarnWarnsOnParseError(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".pyro"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath(home), []byte("{not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg config
+	stderr := captureStderr(t, func() {
+		cfg = loadConfigOrWarn(home)
+	})
+	if !strings.Contains(stderr, configPath(home)) {
+		t.Fatalf("expected warning mentioning %s, got %q", configPath(home), stderr)
+	}
+	// Do NOT abort: still usable, fresh-install-shaped defaults.
+	if cfg.Server == "" || cfg.Providers == "" {
+		t.Fatalf("expected defaults to be filled in despite the parse error: %#v", cfg)
+	}
+	if cfg.Installed {
+		t.Fatalf("expected Installed=false after a parse error, got %#v", cfg)
+	}
+}
+
+func TestCredentialsAlreadySaved(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config
+		want bool
+	}{
+		{"neither set", config{}, false},
+		{"only profile", config{Profile: "acct1"}, false},
+		{"only machine", config{Machine: "tok"}, false},
+		{"whitespace only", config{Profile: "  ", Machine: "  "}, false},
+		{"both set", config{Profile: "acct1", Machine: "tok"}, true},
+	}
+	for _, tc := range cases {
+		if got := credentialsAlreadySaved(tc.cfg); got != tc.want {
+			t.Errorf("%s: credentialsAlreadySaved(%#v) = %v, want %v", tc.name, tc.cfg, got, tc.want)
+		}
 	}
 }
 

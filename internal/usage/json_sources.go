@@ -329,9 +329,12 @@ func parseCopilotObject(path string, obj object) (Event, bool) {
 	if input == 0 && output == 0 && cacheRead == 0 && cacheWrite == 0 && reasoning == 0 {
 		return Event{}, false
 	}
-	if input >= cacheRead {
-		input -= cacheRead
-	}
+	// Copilot's prompt_tokens/input_tokens includes cache-read tokens; back
+	// them out so cache reads aren't double-represented. Clamp at 0 rather
+	// than skipping the subtraction when cacheRead > input, which would
+	// otherwise leave the cache tokens counted twice (once in input, once
+	// in cache_read).
+	input = max(0, input-cacheRead)
 	ts := parseCopilotTime(obj)
 	model := firstString(attrs, []string{"gen_ai.response.model"}, []string{"gen_ai.request.model"})
 	session := firstString(attrs, []string{"gen_ai.conversation.id"}, []string{"gen_ai.thread.id"}, []string{"sessionId"})
@@ -352,9 +355,9 @@ func parseGeminiObject(path string, obj object) (Event, bool) {
 	}
 	input := firstInt(tokens, "input", "input_tokens", "promptTokenCount")
 	cached := firstInt(tokens, "cached", "cachedContentTokenCount", "cache_read")
-	if input >= cached {
-		input -= cached
-	}
+	// Same as Copilot above: Gemini's input token count includes cached
+	// tokens, so subtract them out (clamped at 0) to avoid double-counting.
+	input = max(0, input-cached)
 	usage := TokenUsage{
 		Input:     input,
 		Output:    firstInt(tokens, "output", "output_tokens", "candidatesTokenCount"),

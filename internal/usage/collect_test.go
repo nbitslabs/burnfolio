@@ -144,6 +144,36 @@ func TestParseAdditionalJSONSources(t *testing.T) {
 	}
 }
 
+func TestParseCopilotAndGeminiClampCacheSubtraction(t *testing.T) {
+	// input < cacheRead is an edge case the source data shouldn't normally
+	// produce, but when it does the old code skipped the subtraction
+	// entirely (leaving input untouched), double-counting the cache tokens
+	// in both Input and CacheRead. Input should now clamp to 0 instead.
+	copilotObj := mustObject(t, `{"attributes":{"gen_ai.response.model":"claude-sonnet-4","gen_ai.usage.input_tokens":10,"gen_ai.usage.cache_read.input_tokens":25,"gen_ai.usage.output_tokens":5}}`)
+	event, ok := parseCopilotObject("copilot.jsonl", copilotObj)
+	if !ok {
+		t.Fatal("expected copilot event")
+	}
+	if event.Usage.Input != 0 {
+		t.Fatalf("copilot input = %d, want 0 (clamped)", event.Usage.Input)
+	}
+	if event.Usage.CacheRead != 25 {
+		t.Fatalf("copilot cache_read = %d, want 25", event.Usage.CacheRead)
+	}
+
+	geminiObj := mustObject(t, `{"timestamp":"2026-06-21T00:00:00Z","sessionId":"g1","model":"gemini-3-flash","tokens":{"input":10,"cached":50,"output":25}}`)
+	event, ok = parseGeminiObject("gemini.jsonl", geminiObj)
+	if !ok {
+		t.Fatal("expected gemini event")
+	}
+	if event.Usage.Input != 0 {
+		t.Fatalf("gemini input = %d, want 0 (clamped)", event.Usage.Input)
+	}
+	if event.Usage.CacheRead != 50 {
+		t.Fatalf("gemini cache_read = %d, want 50", event.Usage.CacheRead)
+	}
+}
+
 func TestSQLiteReaders(t *testing.T) {
 	dir := t.TempDir()
 	hermesPath := filepath.Join(dir, "state.db")
@@ -188,6 +218,68 @@ func TestSQLiteReaders(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Usage.Burn() != 105 {
 		t.Fatalf("bad kilo events: %#v", events)
+	}
+}
+
+func TestSQLiteReadersPreferUpdatedAtOverStartedAt(t *testing.T) {
+	dir := t.TempDir()
+
+	hermesPath := filepath.Join(dir, "state.db")
+	db, err := sql.Open("sqlite", hermesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// started_at is day one of a multi-day session; updated_at is the last
+	// activity, on a later day. If the reader still buckets by started_at,
+	// DateUTC below will be wrong.
+	_, err = db.Exec(`CREATE TABLE sessions (
+		id TEXT, model TEXT, billing_provider TEXT, started_at REAL, updated_at REAL, message_count INTEGER,
+		input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+		reasoning_tokens INTEGER, estimated_cost_usd REAL, actual_cost_usd REAL
+	);
+	INSERT INTO sessions VALUES ('h1', 'claude-sonnet-4', 'anthropic', 1780000000.0, 1780300000.0, 2, 10, 20, 30, 40, 5, 0.1, 0.2);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	events, err := readHermesDB(hermesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("hermes events = %d, want 1", len(events))
+	}
+	wantDate := parseAnyTime(1780300000.0).UTC().Format("2006-01-02")
+	if events[0].DateUTC != wantDate {
+		t.Fatalf("hermes DateUTC = %q, want %q (should use updated_at, not started_at)", events[0].DateUTC, wantDate)
+	}
+
+	goosePath := filepath.Join(dir, "sessions.db")
+	db, err = sql.Open("sqlite", goosePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE sessions (
+		id TEXT, model_config_json TEXT, provider_name TEXT, created_at TEXT, updated_at TEXT,
+		total_tokens INTEGER, input_tokens INTEGER, output_tokens INTEGER,
+		accumulated_total_tokens INTEGER, accumulated_input_tokens INTEGER, accumulated_output_tokens INTEGER
+	);
+	INSERT INTO sessions VALUES ('g1', '{"model_name":"gpt-5"}', 'openai', '2026-01-01T00:00:00Z', '2026-01-05T00:00:00Z', 30, 10, 20, 0, 0, 0);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	events, err = readGooseDB(goosePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("goose events = %d, want 1", len(events))
+	}
+	if events[0].DateUTC != "2026-01-05" {
+		t.Fatalf("goose DateUTC = %q, want 2026-01-05 (should use updated_at, not created_at)", events[0].DateUTC)
 	}
 }
 
