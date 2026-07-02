@@ -119,7 +119,6 @@ func (c Client) dailyUsageRange(ctx context.Context, start string, end time.Time
 	for _, row := range decoded.Data.Data {
 		input := row.TokensPrompt.Int64()
 		output := row.TokensCompletion.Int64()
-		reasoning := row.ReasoningTokens.Int64()
 		days = append(days, Day{
 			DateUTC: row.DateDay,
 			Records: int(row.RequestCount.Int64()),
@@ -127,8 +126,16 @@ func (c Client) dailyUsageRange(ctx context.Context, start string, end time.Time
 				Input:     input,
 				Output:    output,
 				CacheRead: row.CachedTokens.Int64(),
-				Reasoning: reasoning,
-				Total:     input + output + reasoning,
+				Reasoning: row.ReasoningTokens.Int64(),
+				// Standardized platform-wide: total = input + output.
+				// Reasoning tokens are informational only (OpenRouter, like
+				// the other providers, includes them in output). The
+				// analytics endpoint also returns tokens_total (captured in
+				// TokensTotal below), but we don't use it: it's redundant
+				// with input+output and OpenRouter doesn't expose a cache
+				// write/prompt split here, so there's nothing extra it
+				// would let us add.
+				Total: input + output,
 			},
 		})
 	}
@@ -184,6 +191,11 @@ type queryRow struct {
 	TokensCompletion jsonNumber `json:"tokens_completion"`
 	ReasoningTokens  jsonNumber `json:"reasoning_tokens"`
 	CachedTokens     jsonNumber `json:"cached_tokens"`
+	// TokensTotal is requested in dailyUsageRange's Metrics but currently
+	// unused: it's redundant with TokensPrompt+TokensCompletion under the
+	// input+output total standard. Captured here so it's not silently
+	// dropped and is available if that changes.
+	TokensTotal jsonNumber `json:"tokens_total"`
 }
 
 type jsonNumber string
