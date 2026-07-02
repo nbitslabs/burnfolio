@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -73,6 +74,23 @@ func TestSyncStatusIncludesSkippedDays(t *testing.T) {
 	want := "ok: 2 days, 1 skipped"
 	if got != want {
 		t.Fatalf("status = %q, want %q", got, want)
+	}
+}
+
+func TestFlagSetProvided(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	providers := fs.String("providers", "all", "")
+	if err := fs.Parse([]string{"--providers", "all"}); err != nil {
+		t.Fatal(err)
+	}
+	if !flagSetProvided(fs, "providers") {
+		t.Fatal("expected providers to be marked as provided")
+	}
+	if *providers != "all" {
+		t.Fatalf("providers = %q", *providers)
+	}
+	if flagSetProvided(fs, "machine") {
+		t.Fatal("did not expect machine to be marked as provided")
 	}
 }
 

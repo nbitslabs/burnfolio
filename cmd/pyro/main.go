@@ -96,6 +96,7 @@ func main() {
 	flag.BoolVar(&noSync, "no-sync", false, "collect and print only; do not sync even when configured")
 	flag.BoolVar(&noSync, "no-run", false, "alias for -no-sync")
 	flag.Parse()
+	providersProvided := flagProvided("providers")
 
 	if home == "" {
 		fmt.Fprintln(os.Stderr, "could not determine home directory; pass -home")
@@ -103,7 +104,7 @@ func main() {
 	}
 
 	cfg, _ := loadConfig(defaultHome)
-	if providers == defaultProviders && cfg.Providers != "" {
+	if !providersProvided && cfg.Providers != "" {
 		providers = cfg.Providers
 	}
 	if profile == "" && cfg.Installed {
@@ -165,7 +166,6 @@ func main() {
 		cfg.Profile = profile
 		cfg.Machine = machine
 		cfg.Server = server
-		cfg.Providers = providers
 		cfg.Installed = true
 		cfg.UninstalledAt = ""
 		cfg.LastSyncAt = time.Now().UTC().Format(time.RFC3339)
@@ -501,6 +501,20 @@ func cleanClientVersion(value string) string {
 		}
 	}
 	return value
+}
+
+func flagProvided(name string) bool {
+	return flagSetProvided(flag.CommandLine, name)
+}
+
+func flagSetProvided(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
 
 func valueOr(value string, fallback string) string {

@@ -578,14 +578,14 @@ async function ingest(request, env) {
         (machine_id, user_id, date_utc, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, records, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       ON CONFLICT(machine_id, date_utc) DO UPDATE SET
-        input_tokens = excluded.input_tokens,
-        cache_read_tokens = excluded.cache_read_tokens,
-        cache_write_tokens = excluded.cache_write_tokens,
-        output_tokens = excluded.output_tokens,
-        reasoning_tokens = excluded.reasoning_tokens,
-        total_tokens = excluded.total_tokens,
-        records = excluded.records,
-        updated_at = excluded.updated_at
+        input_tokens = CASE WHEN excluded.total_tokens >= daily_machine_usage.total_tokens THEN excluded.input_tokens ELSE daily_machine_usage.input_tokens END,
+        cache_read_tokens = CASE WHEN excluded.total_tokens >= daily_machine_usage.total_tokens THEN excluded.cache_read_tokens ELSE daily_machine_usage.cache_read_tokens END,
+        cache_write_tokens = CASE WHEN excluded.total_tokens >= daily_machine_usage.total_tokens THEN excluded.cache_write_tokens ELSE daily_machine_usage.cache_write_tokens END,
+        output_tokens = CASE WHEN excluded.total_tokens >= daily_machine_usage.total_tokens THEN excluded.output_tokens ELSE daily_machine_usage.output_tokens END,
+        reasoning_tokens = CASE WHEN excluded.total_tokens >= daily_machine_usage.total_tokens THEN excluded.reasoning_tokens ELSE daily_machine_usage.reasoning_tokens END,
+        total_tokens = MAX(daily_machine_usage.total_tokens, excluded.total_tokens),
+        records = MAX(daily_machine_usage.records, excluded.records),
+        updated_at = CASE WHEN excluded.total_tokens >= daily_machine_usage.total_tokens THEN excluded.updated_at ELSE daily_machine_usage.updated_at END
     `).bind(machine.id, machine.user_id, date, input, cacheRead, cacheWrite, output, reasoning, total, records));
   }
   if (statements.length) await env.DB.batch(statements);
