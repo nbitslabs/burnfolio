@@ -4,6 +4,51 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const MAX_SYNC_DAYS = 3000;
 const MAX_TOKEN_FIELD = 1_000_000_000_000;
 const MAX_RECORDS_PER_DAY = 1_000_000;
+const MAX_SOURCE_ROWS_PER_DAY = 200;
+
+// Approximate public list prices in USD per million tokens, snapshotted July 2026.
+// Matched by substring against the lowercased model string reported by each source
+// (first match in this order wins), so more specific entries must precede broader
+// ones in the same family. Prices drift; this table needs periodic review.
+const PRICING_DEFAULT = { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 };
+const PRICING_TABLE = [
+  { match: "claude-opus-4", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+  { match: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+  { match: "claude-haiku-4", input: 1, output: 5, cache_read: 0.1, cache_write: 1.25 },
+  { match: "claude-3-opus", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75 },
+  { match: "claude-3-7-sonnet", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+  { match: "claude-3-5-sonnet", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+  { match: "claude-3-5-haiku", input: 0.8, output: 4, cache_read: 0.08, cache_write: 1 },
+  { match: "claude-3-haiku", input: 0.25, output: 1.25, cache_read: 0.03, cache_write: 0.3 },
+  { match: "gpt-5", input: 1.25, output: 10, cache_read: 0.625, cache_write: 1.25 },
+  { match: "gpt-4.1-mini", input: 0.4, output: 1.6, cache_read: 0.2, cache_write: 0.4 },
+  { match: "gpt-4.1-nano", input: 0.1, output: 0.4, cache_read: 0.05, cache_write: 0.1 },
+  { match: "gpt-4.1", input: 2, output: 8, cache_read: 1, cache_write: 2 },
+  { match: "gpt-4o-mini", input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.15 },
+  { match: "gpt-4o", input: 2.5, output: 10, cache_read: 1.25, cache_write: 2.5 },
+  { match: "o3-mini", input: 1.1, output: 4.4, cache_read: 0.55, cache_write: 1.1 },
+  { match: "o3", input: 2, output: 8, cache_read: 1, cache_write: 2 },
+  { match: "o1-mini", input: 1.1, output: 4.4, cache_read: 0.55, cache_write: 1.1 },
+  { match: "o1", input: 15, output: 60, cache_read: 7.5, cache_write: 15 },
+  { match: "gemini-2.5-pro", input: 1.25, output: 10, cache_read: 0.31, cache_write: 1.25 },
+  { match: "gemini-2.5-flash", input: 0.3, output: 2.5, cache_read: 0.075, cache_write: 0.3 },
+  { match: "gemini-1.5-pro", input: 1.25, output: 5, cache_read: 0.3125, cache_write: 1.25 },
+  { match: "gemini-1.5-flash", input: 0.075, output: 0.3, cache_read: 0.01875, cache_write: 0.075 },
+  { match: "gemini", input: 1.25, output: 10, cache_read: 0.31, cache_write: 1.25 },
+  { match: "deepseek", input: 0.28, output: 0.42, cache_read: 0.03, cache_write: 0.28 },
+  { match: "grok", input: 1.25, output: 2.5, cache_read: 0.2, cache_write: 1.25 },
+  { match: "qwen", input: 0.4, output: 1.2, cache_read: 0.1, cache_write: 0.4 },
+  { match: "kimi", input: 0.6, output: 2.5, cache_read: 0.15, cache_write: 0.6 },
+  { match: "llama", input: 0.2, output: 0.2, cache_read: 0.05, cache_write: 0.2 },
+];
+
+function modelPricing(model) {
+  const key = String(model || "").toLowerCase();
+  for (const entry of PRICING_TABLE) {
+    if (key.includes(entry.match)) return entry;
+  }
+  return PRICING_DEFAULT;
+}
 const MIN_INGEST_DATE = "2020-01-01";
 const DEFAULT_MAX_DAILY_TOKENS_PER_SOURCE = 100_000_000_000;
 const OPENROUTER_ANALYTICS_URL = "https://openrouter.ai/api/v1/analytics/query";
@@ -21,6 +66,7 @@ const RESERVED_HANDLES = new Set([
   "how-we-count",
   "how_we_count",
   "howwecount",
+  "leaderboard",
   "install",
   "uninstall",
   "admin",
@@ -78,6 +124,8 @@ async function route(request, env) {
   if (path === "/signin") return authRoute(request, env, "signin");
   if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
   if (path === "/privacy") return html(privacyPage(await signedIn(request, env)));
+  if (path === "/leaderboard") return leaderboardPage(request, env);
+  if (path === "/api/leaderboard" && (request.method === "GET" || request.method === "HEAD")) return leaderboardRoute(request, env);
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/app/orgs") return html(await orgsPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
@@ -333,7 +381,7 @@ async function globalStats(request, env) {
 
 async function globalStatsResponse(request, env) {
   const data = await readGlobalStats(env);
-  return json(data, 200, { "Cache-Control": "no-store" });
+  return json(data, 200, { "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
 }
 
 async function readGlobalStats(env) {
@@ -647,8 +695,21 @@ async function ingest(request, env) {
   const pyroVersion = cleanVersion(body.pyro_version || body.version);
   const days = Array.isArray(body.days) ? body.days : [];
   if (days.length > MAX_SYNC_DAYS) return json({ error: "too_many_days" }, 400);
+
+  const incomingDates = [...new Set(days.map((day) => String(day.date_utc || "")).filter(validIngestDate))];
+  const priorTotals = new Map();
+  // D1 caps bound parameters per statement, and a first full-history sync
+  // can carry years of dates — chunk the IN() lookup to stay under it.
+  for (let i = 0; i < incomingDates.length; i += 90) {
+    const chunk = incomingDates.slice(i, i + 90);
+    const placeholders = chunk.map(() => "?").join(",");
+    const existing = await env.DB.prepare(`SELECT date_utc, total_tokens FROM daily_machine_usage WHERE machine_id = ? AND date_utc IN (${placeholders})`).bind(machine.id, ...chunk).all();
+    for (const row of existing.results || []) priorTotals.set(row.date_utc, row.total_tokens);
+  }
+
   const statements = [];
   let skippedDays = 0;
+  let upsertedDays = 0;
   for (const day of days) {
     const date = String(day.date_utc || "");
     if (!validIngestDate(date)) {
@@ -682,10 +743,47 @@ async function ingest(request, env) {
         records = MAX(daily_machine_usage.records, excluded.records),
         updated_at = CASE WHEN excluded.total_tokens >= daily_machine_usage.total_tokens THEN excluded.updated_at ELSE daily_machine_usage.updated_at END
     `).bind(machine.id, machine.user_id, date, input, cacheRead, cacheWrite, output, reasoning, total, records));
+    upsertedDays++;
+
+    if (!Array.isArray(day.sources)) continue;
+    const priorTotal = priorTotals.has(date) ? priorTotals.get(date) : -1;
+    if (total < priorTotal) continue;
+    priorTotals.set(date, total);
+
+    const seen = new Set();
+    const sourceRows = [];
+    for (const src of day.sources.slice(0, MAX_SOURCE_ROWS_PER_DAY)) {
+      if (!src || typeof src !== "object") continue;
+      const cli = cleanSourceField(src.cli);
+      const model = cleanSourceField(src.model);
+      const key = `${cli} ${model}`;
+      if (seen.has(key)) continue;
+      const srcUsage = src.usage || {};
+      const sInput = boundedInt(srcUsage.input, MAX_TOKEN_FIELD);
+      const sCacheRead = boundedInt(srcUsage.cache_read, MAX_TOKEN_FIELD);
+      const sCacheWrite = boundedInt(srcUsage.cache_write, MAX_TOKEN_FIELD);
+      const sOutput = boundedInt(srcUsage.output, MAX_TOKEN_FIELD);
+      const sReasoning = boundedInt(srcUsage.reasoning, MAX_TOKEN_FIELD);
+      const sExplicitTotal = srcUsage.total;
+      const sTotal = sExplicitTotal ? boundedInt(sExplicitTotal, MAX_TOKEN_FIELD) : boundedInt(sInput + sCacheRead + sCacheWrite + sOutput, MAX_TOKEN_FIELD);
+      const sRecords = boundedInt(src.records, MAX_RECORDS_PER_DAY);
+      if ([sInput, sCacheRead, sCacheWrite, sOutput, sReasoning, sTotal, sRecords].some((value) => value === null)) continue;
+      seen.add(key);
+      sourceRows.push({ cli, model, records: sRecords, input: sInput, cacheRead: sCacheRead, cacheWrite: sCacheWrite, output: sOutput, reasoning: sReasoning, total: sTotal });
+    }
+
+    statements.push(env.DB.prepare("DELETE FROM daily_machine_source_usage WHERE machine_id = ? AND date_utc = ?").bind(machine.id, date));
+    for (const row of sourceRows) {
+      statements.push(env.DB.prepare(`
+        INSERT INTO daily_machine_source_usage
+          (machine_id, user_id, date_utc, cli, model, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      `).bind(machine.id, machine.user_id, date, row.cli, row.model, row.records, row.input, row.cacheRead, row.cacheWrite, row.output, row.reasoning, row.total));
+    }
   }
   if (statements.length) await env.DB.batch(statements);
   await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_pyro_version = ? WHERE id = ?").bind(pyroVersion || null, machine.id).run();
-  return json({ ok: true, upserted_days: statements.length, skipped_days: skippedDays });
+  return json({ ok: true, upserted_days: upsertedDays, skipped_days: skippedDays });
 }
 
 async function ingestOpenRouter(request, env) {
@@ -1043,14 +1141,76 @@ function publicOpenRouterConnection(connection, sync = {}) {
 async function profileStatsRoute(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return json({ error: "not_found" }, 404);
-  return json(profile);
+  const economics = await profileEconomics(env, profile.account);
+  return json({
+    account: profile.account,
+    days: profile.days,
+    total_tokens: profile.total_tokens,
+    stats: profile.stats,
+    member_count: profile.member_count,
+    embed_url: profile.embed_url,
+    by_cli: economics.byTool,
+    top_models: economics.topModels,
+    est_cost_usd: economics.estCostUSD,
+    streaks: { current_days: profile.stats.current_streak_days, longest_days: profile.stats.longest_streak_days },
+  }, 200, { "Access-Control-Allow-Origin": "*" });
 }
 
 async function profilePage(request, env, ref) {
   const profile = await buildProfile(env, ref);
   const isSignedIn = await signedIn(request, env);
   if (!profile) return html(notFoundPage(isSignedIn), 404);
+  profile.economics = await profileEconomics(env, profile.account);
   return html(profileHtml(profile, isSignedIn));
+}
+
+async function leaderboardRoute(request, env) {
+  const range = cleanLeaderboardRange(new URL(request.url).searchParams.get("range"));
+  const payload = await cachedLeaderboard(env, range);
+  return json(payload, 200, { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" });
+}
+
+async function leaderboardPage(request, env) {
+  const range = cleanLeaderboardRange(new URL(request.url).searchParams.get("range"));
+  const payload = await cachedLeaderboard(env, range);
+  return html(leaderboardHtml(payload, await signedIn(request, env)));
+}
+
+function leaderboardHtml(payload, isSignedIn) {
+  const isWeek = payload.range === "7d";
+  const rows = payload.entries.map(leaderboardRow).join("") || emptyState("No burn yet", "Sync usage with pyro to appear on the leaderboard.");
+  return layout("Leaderboard — Burnfolio", `
+    <main class="profile leaderboard-page">
+      <header class="profile-head">
+        <div>
+          <p class="eyebrow">Top burn</p>
+          <h1>Leaderboard</h1>
+          <p class="profile-summary"><span>Top ${LEADERBOARD_LIMIT} profiles by token burn. Zero-usage accounts don't appear.</span></p>
+        </div>
+      </header>
+      <nav class="embed-theme-tabs leaderboard-tabs" role="tablist" aria-label="Leaderboard range">
+        <a class="theme-tab${isWeek ? "" : " active"}" role="tab" aria-selected="${isWeek ? "false" : "true"}" href="/leaderboard">All time</a>
+        <a class="theme-tab${isWeek ? " active" : ""}" role="tab" aria-selected="${isWeek ? "true" : "false"}" href="/leaderboard?range=7d">Last 7 days</a>
+      </nav>
+      <section class="leaderboard-list">${rows}</section>
+    </main>
+  `, {
+    description: "The Burnfolio leaderboard: top AI token burn, all time and last 7 days.",
+    canonical: `https://burnfolio.ai/leaderboard${isWeek ? "?range=7d" : ""}`,
+    signedIn: isSignedIn,
+  });
+}
+
+function leaderboardRow(entry) {
+  const name = esc(entry.display_name && entry.display_name !== "Anonymous builder" ? entry.display_name : entry.ref);
+  const topClass = entry.rank <= 3 ? ` leaderboard-top leaderboard-top-${entry.rank}` : "";
+  return `<a class="leaderboard-row${topClass}" href="/${esc(entry.ref)}">
+    <span class="leaderboard-rank">#${entry.rank}</span>
+    <span class="leaderboard-name"><span class="profile-kind-icon" aria-label="${esc(entry.kind)}">${faIcon(entry.kind)}</span>${name}</span>
+    <span class="leaderboard-total">${formatCompact(entry.total_tokens)}</span>
+    <span class="leaderboard-meta">${formatInt(entry.active_days)} active days</span>
+    <span class="leaderboard-meta">${formatInt(entry.current_streak_days)} day streak</span>
+  </a>`;
 }
 
 async function ogProfilePage(env, ref) {
@@ -1061,8 +1221,14 @@ async function ogProfilePage(env, ref) {
 
 async function ogProfilePNGPage(env, ref) {
   const profile = await buildProfile(env, ref);
-  const body = profile ? ogProfilePNG(profile) : ogFallbackPNG("PROFILE NOT FOUND");
-  return pngResponse(body, profile ? 200 : 404, profile ? 300 : 60);
+  if (!profile) return pngResponse(ogFallbackPNG("PROFILE NOT FOUND"), 404, 60);
+  const cacheKey = new Request(`https://cache.internal/og-png/${encodeURIComponent(ref)}/${profile.total_tokens}`);
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+  const response = pngResponse(ogProfilePNG(profile), 200, 600);
+  await cache.put(cacheKey, response.clone());
+  return response;
 }
 
 async function embedPage(request, env, ref) {
@@ -1156,6 +1322,272 @@ async function orgDays(env, orgID) {
 async function orgMemberCount(env, orgID) {
   const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM memberships WHERE org_id = ? AND status = 'active'").bind(orgID).first();
   return int(row && row.count);
+}
+
+async function userSourceRows(env, userID, sinceDate) {
+  const rows = await env.DB.prepare(`
+    SELECT s.cli, s.model, SUM(s.total_tokens) AS total_tokens
+    FROM daily_machine_source_usage s
+    JOIN machines mm ON mm.id = s.machine_id
+    WHERE s.user_id = ? AND mm.org_id IS NULL AND s.date_utc >= ?
+    GROUP BY s.cli, s.model
+  `).bind(userID, sinceDate).all();
+  return rows.results || [];
+}
+
+async function orgSourceRows(env, orgID, sinceDate) {
+  const rows = await env.DB.prepare(`
+    SELECT s.cli, s.model, SUM(s.total_tokens) AS total_tokens
+    FROM daily_machine_source_usage s
+    JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
+    WHERE m.org_id = ? AND s.date_utc >= ?
+    GROUP BY s.cli, s.model
+  `).bind(orgID, sinceDate).all();
+  return rows.results || [];
+}
+
+function summarizeSourceRows(rows) {
+  const total = rows.reduce((sum, r) => sum + int(r.total_tokens), 0);
+  const byToolMap = new Map();
+  const byModelMap = new Map();
+  for (const r of rows) {
+    const tokens = int(r.total_tokens);
+    byToolMap.set(r.cli, (byToolMap.get(r.cli) || 0) + tokens);
+    byModelMap.set(r.model, (byModelMap.get(r.model) || 0) + tokens);
+  }
+  const byTool = [...byToolMap.entries()]
+    .map(([cli, tokens]) => ({ cli, tokens, pct: total ? tokens / total : 0 }))
+    .sort((a, b) => b.tokens - a.tokens);
+  const topModels = [...byModelMap.entries()]
+    .map(([model, tokens]) => ({ model, tokens, pct: total ? tokens / total : 0 }))
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 5);
+  return { total, byTool, topModels };
+}
+
+async function userComponentTotals(env, userID) {
+  const row = await env.DB.prepare(`
+    SELECT
+      COALESCE(SUM(input_tokens), 0) AS input,
+      COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+      COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
+      COALESCE(SUM(output_tokens), 0) AS output
+    FROM (
+      SELECT d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens
+      FROM daily_machine_usage d
+      JOIN machines mm ON mm.id = d.machine_id
+      WHERE d.user_id = ? AND mm.org_id IS NULL
+      UNION ALL
+      SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
+      FROM openrouter_daily_usage
+      WHERE account_id = ?
+    )
+  `).bind(userID, userID).first();
+  return row || { input: 0, cache_read: 0, cache_write: 0, output: 0 };
+}
+
+async function orgComponentTotals(env, orgID) {
+  const row = await env.DB.prepare(`
+    WITH openrouter_rows AS (
+      SELECT o.date_utc, o.openrouter_key_hash,
+        MAX(o.input_tokens) AS input_tokens, MAX(o.cache_read_tokens) AS cache_read_tokens,
+        MAX(o.cache_write_tokens) AS cache_write_tokens, MAX(o.output_tokens) AS output_tokens
+      FROM openrouter_daily_usage o
+      LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
+      WHERE o.account_id = ? OR m.user_id IS NOT NULL
+      GROUP BY o.date_utc, o.openrouter_key_hash
+    )
+    SELECT
+      COALESCE(SUM(input_tokens), 0) AS input,
+      COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+      COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
+      COALESCE(SUM(output_tokens), 0) AS output
+    FROM (
+      SELECT d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens
+      FROM daily_machine_usage d
+      JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active'
+      WHERE m.org_id = ?
+      UNION ALL
+      SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens FROM openrouter_rows
+    )
+  `).bind(orgID, orgID, orgID).first();
+  return row || { input: 0, cache_read: 0, cache_write: 0, output: 0 };
+}
+
+async function userSegmentComponentRows(env, userID) {
+  const rows = await env.DB.prepare(`
+    SELECT s.model,
+      SUM(s.input_tokens) AS input, SUM(s.cache_read_tokens) AS cache_read,
+      SUM(s.cache_write_tokens) AS cache_write, SUM(s.output_tokens) AS output
+    FROM daily_machine_source_usage s
+    JOIN machines mm ON mm.id = s.machine_id
+    WHERE s.user_id = ? AND mm.org_id IS NULL
+    GROUP BY s.model
+  `).bind(userID).all();
+  return rows.results || [];
+}
+
+async function orgSegmentComponentRows(env, orgID) {
+  const rows = await env.DB.prepare(`
+    SELECT s.model,
+      SUM(s.input_tokens) AS input, SUM(s.cache_read_tokens) AS cache_read,
+      SUM(s.cache_write_tokens) AS cache_write, SUM(s.output_tokens) AS output
+    FROM daily_machine_source_usage s
+    JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
+    WHERE m.org_id = ?
+    GROUP BY s.model
+  `).bind(orgID).all();
+  return rows.results || [];
+}
+
+function estimateCostUSD(componentTotals, segmentRows) {
+  let cost = 0;
+  let segInput = 0;
+  let segCacheRead = 0;
+  let segCacheWrite = 0;
+  let segOutput = 0;
+  for (const row of segmentRows) {
+    const price = modelPricing(row.model);
+    const rowInput = int(row.input);
+    const rowCacheRead = int(row.cache_read);
+    const rowCacheWrite = int(row.cache_write);
+    const rowOutput = int(row.output);
+    cost += (rowInput / 1e6) * price.input + (rowOutput / 1e6) * price.output
+      + (rowCacheRead / 1e6) * price.cache_read + (rowCacheWrite / 1e6) * price.cache_write;
+    segInput += rowInput;
+    segCacheRead += rowCacheRead;
+    segCacheWrite += rowCacheWrite;
+    segOutput += rowOutput;
+  }
+  const remainderInput = Math.max(0, int(componentTotals.input) - segInput);
+  const remainderCacheRead = Math.max(0, int(componentTotals.cache_read) - segCacheRead);
+  const remainderCacheWrite = Math.max(0, int(componentTotals.cache_write) - segCacheWrite);
+  const remainderOutput = Math.max(0, int(componentTotals.output) - segOutput);
+  cost += (remainderInput / 1e6) * PRICING_DEFAULT.input + (remainderOutput / 1e6) * PRICING_DEFAULT.output
+    + (remainderCacheRead / 1e6) * PRICING_DEFAULT.cache_read + (remainderCacheWrite / 1e6) * PRICING_DEFAULT.cache_write;
+  return cost;
+}
+
+async function profileEconomics(env, account) {
+  const since = sameDatePreviousYear(todayUTCDate()).toISOString().slice(0, 10);
+  const isOrg = account.kind === "org";
+  const [sourceRows, componentTotals, segmentComponentRows] = await Promise.all([
+    isOrg ? orgSourceRows(env, account.id, since) : userSourceRows(env, account.id, since),
+    isOrg ? orgComponentTotals(env, account.id) : userComponentTotals(env, account.id),
+    isOrg ? orgSegmentComponentRows(env, account.id) : userSegmentComponentRows(env, account.id),
+  ]);
+  const breakdown = summarizeSourceRows(sourceRows);
+  const estCostUSD = estimateCostUSD(componentTotals, segmentComponentRows);
+  return { hasBreakdown: sourceRows.length > 0, byTool: breakdown.byTool, topModels: breakdown.topModels, estCostUSD };
+}
+
+const LEADERBOARD_LIMIT = 50;
+
+function cleanLeaderboardRange(value) {
+  return value === "7d" ? "7d" : "all";
+}
+
+async function fetchLeaderboard(env, range) {
+  const clamp = dailyTokenClamp(env);
+  const since = range === "7d" ? dateOffsetUTC(todayUTCDate().toISOString().slice(0, 10), -6) : MIN_INGEST_DATE;
+  const rows = await env.DB.prepare(`
+    WITH personal_machine AS (
+      SELECT d.user_id AS account_id, MIN(d.total_tokens, ?) AS total_tokens
+      FROM daily_machine_usage d
+      JOIN machines mm ON mm.id = d.machine_id
+      WHERE mm.org_id IS NULL AND d.date_utc >= ?
+    ),
+    personal_openrouter AS (
+      SELECT o.account_id, MIN(o.total_tokens, ?) AS total_tokens
+      FROM openrouter_daily_usage o
+      JOIN accounts ua ON ua.id = o.account_id AND ua.kind = 'user'
+      WHERE o.date_utc >= ?
+    ),
+    user_totals AS (
+      SELECT account_id, SUM(total_tokens) AS total_tokens, 'user' AS kind
+      FROM (
+        SELECT account_id, total_tokens FROM personal_machine
+        UNION ALL
+        SELECT account_id, total_tokens FROM personal_openrouter
+      )
+      GROUP BY account_id
+    ),
+    org_machine AS (
+      SELECT m.org_id AS account_id, MIN(d.total_tokens, ?) AS total_tokens
+      FROM daily_machine_usage d
+      JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active'
+      WHERE d.date_utc >= ?
+    ),
+    org_openrouter_raw AS (
+      SELECT m.org_id AS account_id, o.date_utc, o.openrouter_key_hash, o.total_tokens
+      FROM openrouter_daily_usage o
+      JOIN memberships m ON m.user_id = o.account_id AND m.status = 'active'
+      WHERE o.date_utc >= ?
+      UNION ALL
+      SELECT o.account_id, o.date_utc, o.openrouter_key_hash, o.total_tokens
+      FROM openrouter_daily_usage o
+      JOIN accounts a ON a.id = o.account_id AND a.kind = 'org'
+      WHERE o.date_utc >= ?
+    ),
+    org_openrouter AS (
+      SELECT account_id, MIN(MAX(total_tokens), ?) AS total_tokens
+      FROM org_openrouter_raw
+      GROUP BY account_id, date_utc, openrouter_key_hash
+    ),
+    org_totals AS (
+      SELECT account_id, SUM(total_tokens) AS total_tokens, 'org' AS kind
+      FROM (
+        SELECT account_id, total_tokens FROM org_machine
+        UNION ALL
+        SELECT account_id, total_tokens FROM org_openrouter
+      )
+      GROUP BY account_id
+    ),
+    ranked AS (
+      SELECT account_id, SUM(total_tokens) AS total_tokens, kind
+      FROM (
+        SELECT * FROM user_totals
+        UNION ALL
+        SELECT * FROM org_totals
+      )
+      GROUP BY account_id, kind
+    )
+    SELECT a.id AS account_id, a.account_number, h.handle, a.display_name, r.kind, r.total_tokens
+    FROM ranked r
+    JOIN accounts a ON a.id = r.account_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE r.total_tokens > 0
+    ORDER BY r.total_tokens DESC
+    LIMIT ?
+  `).bind(clamp, since, clamp, since, clamp, since, since, since, clamp, LEADERBOARD_LIMIT).all();
+
+  const entries = [];
+  for (const [index, row] of (rows.results || []).entries()) {
+    const days = row.kind === "org" ? await orgDays(env, row.account_id) : await userDays(env, row.account_id);
+    const stats = profileStats(days, int(row.total_tokens));
+    entries.push({
+      rank: index + 1,
+      ref: row.handle || row.account_number,
+      display_name: row.display_name,
+      kind: row.kind,
+      total_tokens: int(row.total_tokens),
+      active_days: stats.active_days,
+      current_streak_days: stats.current_streak_days,
+    });
+  }
+  return entries;
+}
+
+async function cachedLeaderboard(env, range) {
+  const cacheKey = new Request(`https://cache.internal/leaderboard/${range}`);
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached.json();
+  const entries = await fetchLeaderboard(env, range);
+  const payload = { range, generated_at: new Date().toISOString(), entries };
+  const response = json(payload, 200, { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" });
+  await cache.put(cacheKey, response.clone());
+  return payload;
 }
 
 async function updateAccountMetadata(env, accountID, fields) {
@@ -1762,9 +2194,13 @@ function profileHtml(profile, isSignedIn = false) {
         ${profile.account.kind === "org" ? statCard("Members", formatInt(profile.member_count)) : ""}
         ${statCard("Best day", formatCompact(stats.best_day_tokens), stats.best_day ? formatDate(stats.best_day) : "No activity yet")}
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
+        ${statCard("Longest streak", formatInt(stats.longest_streak_days))}
+        ${statCard("Daily average", formatCompact(stats.average_active_day_tokens), "on active days")}
+        ${profile.economics ? statCard("Est. API value", `≈ ${formatUSD(profile.economics.estCostUSD)}`, "at public API list prices", "Estimated from public per-model API list prices. Not a bill — actual plan pricing, discounts, and self-hosted models vary.") : ""}
       </section>
       ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
       ${heatmapYears(profile.days).length > 1 ? heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" }) : ""}
+      ${sourceBreakdownSection(profile.economics)}
       <details class="embed-disclosure">
         <summary>Embed this graph</summary>
         ${embedThemePanel(name)}
@@ -1801,7 +2237,10 @@ function profileLinks(account) {
 function shareCopy(profile, displayName) {
   const stats = profile.stats;
   const best = stats.best_day ? ` Best day: ${formatCompact(stats.best_day_tokens)} tokens.` : "";
-  return `${displayName} burned ${formatInt(profile.total_tokens)} AI tokens across ${formatInt(stats.active_days)} active days.${best} Show your burn.`;
+  const cost = profile.economics && profile.economics.estCostUSD > 0 ? ` ≈ ${formatUSD(profile.economics.estCostUSD)} at API list prices.` : "";
+  const equivalence = shareEquivalence(profile.total_tokens);
+  const equivalenceLine = equivalence ? ` ${equivalence}.` : "";
+  return `${displayName} burned ${formatInt(profile.total_tokens)} AI tokens across ${formatInt(stats.active_days)} active days.${best}${cost}${equivalenceLine} Show your burn.`;
 }
 
 function shareDialog(imageURL, text) {
@@ -2253,6 +2692,16 @@ function howWeCountPage(isSignedIn = false) {
           <h2>Duplicate protection</h2>
           <p>Syncs are idempotent by day, tool, model, machine, and profile. Re-running <code>pyro</code> updates totals instead of adding the same local records again.</p>
         </article>
+        <article class="learn-card">
+          <h2>How we estimate cost</h2>
+          <p>"Est. API value" matches each machine's per-tool, per-model token counts against a table of public per-model API list prices (input, output, and cached-token rates), and prices any unmatched usage at a blended default rate.</p>
+          <p>It's an estimate of what the same usage would cost at public list prices, not a bill. It ignores subscription plans, volume discounts, batch pricing, and self-hosted models, and our price table is a periodically-updated snapshot rather than a live feed.</p>
+        </article>
+        <article class="learn-card">
+          <h2>API</h2>
+          <p><code>GET /api/profiles/:ref/stats</code> returns a profile's public data as JSON: the daily token series, current and longest streaks, per-tool and per-model breakdowns (when available), and the estimated API value. No authentication required — it's the same data shown on the public profile page.</p>
+          <p><code>GET /api/leaderboard?range=all|7d</code> returns the current leaderboard as JSON.</p>
+        </article>
       </section>
       <section class="learn-card learn-wide">
         <h2>Missing burn?</h2>
@@ -2283,7 +2732,7 @@ function privacyPage(isSignedIn = false) {
         <article class="learn-card">
           <h2>What we collect</h2>
           <p>Per synced day, per machine or OpenRouter connection: the date, a request count, and six token counters (input, cache read, cache write, output, reasoning, and total).</p>
-          <p><code>pyro</code> also computes a per-CLI and per-model breakdown of those same counters locally and includes it in the sync payload, so a future release can show it on your graph. Today the server only stores the day-level totals from that payload; the per-CLI/model breakdown is received but not persisted.</p>
+          <p><code>pyro</code> also computes a per-CLI and per-model breakdown of those same six counters locally and includes it in the sync payload. We store that breakdown too — it's still counts only, per tool and per model, per day; no prompts, file paths, or session identifiers are ever part of it.</p>
           <p>Account data: an account number and key, an optional email address (for magic-link sign-in and recovery), an optional handle, and any bio or profile links you choose to add.</p>
           <p>OpenRouter keys you connect from the dashboard are encrypted at rest. Keys <code>pyro</code> imports from your local OpenRouter config never leave your machine — only a SHA-256 fingerprint of the key and daily usage totals are uploaded.</p>
         </article>
@@ -2315,8 +2764,8 @@ function layout(title, body, meta = {}) {
   const imageType = meta.imageType || "image/png";
   const siteName = meta.siteName || "Burnfolio";
   const navLinks = meta.signedIn
-    ? `<a href="/how-we-count">How we count</a><a class="nav-cta" href="/app">Dashboard</a>`
-    : `<a href="/how-we-count">How we count</a><a href="/signin">Sign in</a><a class="nav-cta" href="/signup">Create graph</a>`;
+    ? `<a href="/leaderboard">Leaderboard</a><a href="/how-we-count">How we count</a><a class="nav-cta" href="/app">Dashboard</a>`
+    : `<a href="/leaderboard">Leaderboard</a><a href="/how-we-count">How we count</a><a href="/signin">Sign in</a><a class="nav-cta" href="/signup">Create graph</a>`;
   return `<!doctype html><html lang="en" class="brand-burnfolio"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(description)}">
@@ -2347,6 +2796,7 @@ function siteFooter() {
   return `<footer class="site-footer">
     <div class="site-footer-links">
       <a href="https://github.com/nbitslabs/burnfolio" rel="noopener noreferrer" target="_blank">GitHub</a>
+      <a href="/leaderboard">Leaderboard</a>
       <a href="/how-we-count">How we count</a>
       <a href="/privacy">Privacy</a>
     </div>
@@ -2497,8 +2947,54 @@ function faIcon(name) {
   return `<svg class="fa-icon" aria-hidden="true" viewBox="${icon.viewBox}" focusable="false"><path fill="currentColor" d="${icon.path}"></path></svg>`;
 }
 
-function statCard(label, value, detail = "") {
-  return `<div><span>${esc(label)}</span><strong>${esc(value)}</strong>${detail ? `<em>${esc(detail)}</em>` : ""}</div>`;
+function statCard(label, value, detail = "", tip = "") {
+  const tipMarkup = tip ? ` <span class="stat-tip" data-tip="${esc(tip)}" title="${esc(tip)}" tabindex="0" role="img" aria-label="${esc(tip)}">?</span>` : "";
+  return `<div><span>${esc(label)}${tipMarkup}</span><strong>${esc(value)}</strong>${detail ? `<em>${esc(detail)}</em>` : ""}</div>`;
+}
+
+function sourceBreakdownSection(economics) {
+  if (!economics || !economics.hasBreakdown) return "";
+  const toolBars = economics.byTool.map((row) => `
+    <div class="tool-bar">
+      <div class="tool-bar-label"><span>${esc(row.cli)}</span><span>${formatCompact(row.tokens)} · ${Math.round(row.pct * 100)}%</span></div>
+      <div class="tool-bar-track"><div class="tool-bar-fill" style="width:${Math.max(2, Math.round(row.pct * 100))}%"></div></div>
+    </div>`).join("");
+  const modelRows = economics.topModels.map((row, i) => `
+    <div class="model-row"><span class="model-rank">${i + 1}</span><span class="model-name">${esc(row.model)}</span><span class="model-tokens">${formatCompact(row.tokens)}</span></div>`).join("");
+  return `<section class="graph burning-panel">
+    <div class="section-head"><div><h2>What's burning</h2><p class="muted">Past year, by tool and model.</p></div></div>
+    <div class="burning-grid">
+      <div class="tool-bars">${toolBars}</div>
+      <div class="model-list">${modelRows || `<p class="muted">Not enough model data yet.</p>`}</div>
+    </div>
+  </section>`;
+}
+
+const SHARE_EQUIVALENCES = [
+  { min: 1_000_000_000_000, unit: 4_000_000_000, label: "the entire English Wikipedia (~4B tokens)" },
+  { min: 10_000_000_000, unit: 1_200_000, label: "the complete works of Shakespeare (~1.2M tokens)" },
+  { min: 100_000_000, unit: 900_000, label: "the Lord of the Rings trilogy (~900K tokens)" },
+  { min: 1_000_000, unit: 130_000, label: "a Harry Potter novel (~130K tokens)" },
+];
+
+function shareEquivalence(totalTokens) {
+  totalTokens = int(totalTokens);
+  for (const rung of SHARE_EQUIVALENCES) {
+    if (totalTokens >= rung.min) {
+      const count = Math.max(1, Math.round(totalTokens / rung.unit));
+      return `≈ ${formatCompact(count)} ${count === 1 ? "copy" : "copies"} of ${rung.label}`;
+    }
+  }
+  return "";
+}
+
+function formatUSD(value) {
+  value = Math.max(0, Number(value) || 0);
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1000) return `$${(value / 1000).toFixed(1)}k`;
+  if (value >= 1) return `$${value.toFixed(0)}`;
+  if (value > 0) return `$${value.toFixed(2)}`;
+  return "$0";
 }
 
 function snippet(label, code) {
@@ -2575,11 +3071,24 @@ function profileStats(days, total) {
     last365Tokens += dayMap.get(d.toISOString().slice(0, 10)) || 0;
   }
 
+  let longestStreak = 0;
+  let running = 0;
+  let prevDate = null;
+  for (const dateStr of activeDays.map((day) => day.date_utc).sort()) {
+    const d = parseUTCDate(dateStr);
+    if (!d) continue;
+    running = prevDate && Math.round((d - prevDate) / 86400000) === 1 ? running + 1 : 1;
+    if (running > longestStreak) longestStreak = running;
+    prevDate = d;
+  }
+  longestStreak = Math.max(longestStreak, currentStreak);
+
   return {
     active_days: activeDays.length,
     best_day: bestDay,
     best_day_tokens: bestDayTokens,
     current_streak_days: currentStreak,
+    longest_streak_days: longestStreak,
     average_active_day_tokens: activeDays.length ? Math.round(total / activeDays.length) : 0,
     last_365_tokens: last365Tokens,
   };
@@ -3822,6 +4331,11 @@ function magicEmailHtml(link) {
 
 function cleanText(value, max) {
   return String(value || "").trim().slice(0, max);
+}
+
+function cleanSourceField(value) {
+  const text = String(value || "").trim().toLowerCase().slice(0, 200);
+  return text || "unknown";
 }
 
 function int(value) {
