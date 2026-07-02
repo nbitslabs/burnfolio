@@ -288,6 +288,14 @@ pre code {
 .muted,
 .helper { color: var(--muted); }
 .helper { margin: 10px 0 0; font-size: 14px; }
+.example-link {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--burnfolio-ember);
+  font-weight: 800;
+  font-size: 14px;
+}
+.example-link:hover { color: var(--burnfolio-flame-deep); }
 .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .result {
   max-width: 100%;

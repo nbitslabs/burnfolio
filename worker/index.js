@@ -1408,7 +1408,8 @@ function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { us
             ? `<a class="button" href="/app">Open dashboard</a>`
             : `<a class="button" href="/signup">Create your graph</a><a class="button secondary" href="/signin">Sign in</a>`}
         </div>
-        <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine. <a href="/raghavsood">See an example profile</a>.</p>
+        <p class="helper">Counts, not content. No prompts, code, or transcripts leave your machine.</p>
+        <a class="example-link" href="/raghavsood">See an example profile &rarr;</a>
         </div>
         <section class="showcase">
           <div class="showcase-top">
@@ -2281,9 +2282,10 @@ function privacyPage(isSignedIn = false) {
       <section class="learn-grid">
         <article class="learn-card">
           <h2>What we collect</h2>
-          <p>Per synced day, per machine or OpenRouter connection: the date, input tokens, cache read tokens, cache write tokens, output tokens, reasoning tokens, and a request count.</p>
+          <p>Per synced day, per machine or OpenRouter connection: the date, a request count, and six token counters (input, cache read, cache write, output, reasoning, and total).</p>
+          <p><code>pyro</code> also computes a per-CLI and per-model breakdown of those same counters locally and includes it in the sync payload, so a future release can show it on your graph. Today the server only stores the day-level totals from that payload; the per-CLI/model breakdown is received but not persisted.</p>
           <p>Account data: an account number and key, an optional email address (for magic-link sign-in and recovery), an optional handle, and any bio or profile links you choose to add.</p>
-          <p>If you connect OpenRouter, we store the management key encrypted at rest. <code>pyro</code> itself only ever sends us a hash of your OpenRouter key, never the key itself.</p>
+          <p>OpenRouter keys you connect from the dashboard are encrypted at rest. Keys <code>pyro</code> imports from your local OpenRouter config never leave your machine — only a SHA-256 fingerprint of the key and daily usage totals are uploaded.</p>
         </article>
         <article class="learn-card">
           <h2>What we never collect</h2>
@@ -2291,7 +2293,7 @@ function privacyPage(isSignedIn = false) {
         </article>
         <article class="learn-card">
           <h2>Cookies</h2>
-          <p>One session cookie, used only to keep you signed in. We don't run third-party trackers or ad pixels. Cloudflare, our hosting provider, collects standard aggregate web analytics for the site.</p>
+          <p>One HttpOnly session cookie, used only to keep you signed in. We don't run third-party trackers or ad pixels. Cloudflare, our hosting provider, collects standard aggregate web analytics for the site.</p>
         </article>
         <article class="learn-card">
           <h2>Data deletion</h2>
