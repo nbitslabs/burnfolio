@@ -51,12 +51,14 @@ For a new machine token from the dashboard, copy the generated one-liner:
 curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile <account-number-or-username> --machine <machine-token>
 ```
 
-The dashboard keeps a copy-ready install command on each machine row. For older
-machines where Burnfolio only has the token hash, the row action creates a
-replacement token and copies a complete install command.
+The dashboard keeps a copy-ready install command on each machine row. Burnfolio
+stores machine tokens hashed server-side and shows the full token only once,
+at creation or rotation — the row action rotates the token (the previous
+token stops working) and copies a fresh install command.
 
 The installer asks whether to set up automatic sync with cron: `none`, `hourly`,
-or `daily`. For non-interactive setup, pass the schedule explicitly:
+or `daily`. Cron sync output is logged to `~/.pyro/sync.log`. For non-interactive
+setup, pass the schedule explicitly:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- \
@@ -126,6 +128,10 @@ pyro install --profile bf_ab12cd34 --machine bfm_...
 pyro uninstall
 ```
 
+The first time you sync with `--profile`/`--machine` outside of `pyro install`,
+pyro prints a one-line notice that it saved those credentials to
+`~/.pyro/config.json` so future runs sync automatically.
+
 Build from source for local development:
 
 ```sh
@@ -137,11 +143,20 @@ pyro
 ```
 
 The table output is grouped by date, CLI, and model. JSON output includes
-provider totals plus the same date/CLI/model segments for the future server API.
+provider totals plus the same date/CLI/model segments for the server API.
 
 When `--profile` and `--machine` are provided, the CLI uploads all local history to
-Burnfolio as one idempotent total per day. Re-running the same command
-replaces each machine/day row instead of double-counting it.
+Burnfolio as one idempotent total per day, broken down by CLI and model.
+Re-running the same command replaces each machine/day row instead of
+double-counting it. Only counts leave your machine — no prompts, code, or
+transcripts are ever uploaded. Each synced day carries the date, a record
+count, six token counters (input, cache read, cache write, output, reasoning,
+total), and the same six counters split out per CLI and model.
+
+Total token counts are `input + cache_read + cache_write + output`. Reasoning
+tokens are reported separately but are informational only and never added
+into the total, since providers already include them in the output count.
+OpenRouter imports use the same definition.
 
 ## OpenRouter Usage
 
