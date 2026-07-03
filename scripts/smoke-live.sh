@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Anonymous signup (POST /api/signup) was removed from Burnfolio — accounts
+# are created via email magic links only, which this script cannot automate.
+# Use scripts/verify-account.sh with a pre-provisioned BURNFOLIO_PROFILE and
+# BURNFOLIO_MACHINE for live acceptance checks instead.
+echo "smoke-live.sh is retired: anonymous signup was removed from the server." >&2
+echo "Use scripts/verify-account.sh with pre-provisioned credentials." >&2
+exit 1
+
 BASE="${BURNFOLIO_SERVER:-https://burnfolio.ai}"
 PROVIDERS="${BURNFOLIO_SMOKE_PROVIDERS:-pi}"
 STAMP="$(date +%s)"

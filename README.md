@@ -187,10 +187,10 @@ same daily rows are updated instead of added twice.
 
 ## Hosted Flow
 
-Create an anonymous account at `https://burnfolio.ai`. Signup returns an account
-number, account key, machine token, and a ready-to-run sync command. Save the
-account key: it is the private credential used with the public account number to
-sign back in before adding an email or username.
+Create an account at `https://burnfolio.ai` with an email magic link — no
+password. After signing in, the dashboard provides machine tokens and
+ready-to-run install + sync commands. Accounts created before magic-link-only
+signup can still sign in with their account number and key.
 
 Run the generated install + sync command locally:
 
@@ -198,24 +198,16 @@ Run the generated install + sync command locally:
 curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile <account-number-or-username> --machine <machine-token>
 ```
 
-From the dashboard you can claim a username, attach an optional email for magic
-links, create personal or organization machine tokens, create the `nbitslabs`
-org, and add users as members or admins. Public user and org pages expose the
-same burn graph plus iframe and SVG embed snippets.
+From the dashboard you can claim a username, create personal or organization
+machine tokens, create the `nbitslabs` org, and invite users as members or
+admins. Public user and org pages expose the same burn graph plus iframe and
+SVG embed snippets.
 
 ## Live Smoke Test
 
-The smoke test creates throwaway timestamped accounts on the configured server
-and verifies anonymous login, CLI sync, dedupe, multi-machine aggregation, org
-rollup, and embed output.
-
-```sh
-scripts/smoke-live.sh
-```
-
-By default it uses `https://burnfolio.ai` and the `pi` collector to keep the
-test lightweight. Override with `BURNFOLIO_SERVER` or
-`BURNFOLIO_SMOKE_PROVIDERS` when needed.
+`scripts/smoke-live.sh` is retired: it relied on anonymous signup, which has
+been removed. Use `scripts/verify-account.sh` with a pre-provisioned account
+instead.
 
 For a real account acceptance pass, set the profile and machine token generated
 by the dashboard:
