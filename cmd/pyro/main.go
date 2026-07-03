@@ -289,9 +289,12 @@ func syncOpenRouterUsage(ctx context.Context, server string, profile string, mac
 	}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	days, err := openrouter.Client{Key: key}.DailyUsage(ctx, since, time.Now().UTC())
+	days, warnings, err := openrouter.Client{Key: key}.DailyUsage(ctx, since, time.Now().UTC())
 	if err != nil {
 		return syncResult{}, err
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", strings.TrimSpace(w))
 	}
 	payload := openRouterPayload{
 		Profile:           profile,
