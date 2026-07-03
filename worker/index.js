@@ -6,49 +6,6 @@ const MAX_TOKEN_FIELD = 1_000_000_000_000;
 const MAX_RECORDS_PER_DAY = 1_000_000;
 const MAX_SOURCE_ROWS_PER_DAY = 200;
 
-// Approximate public list prices in USD per million tokens, snapshotted July 2026.
-// Matched by substring against the lowercased model string reported by each source
-// (first match in this order wins), so more specific entries must precede broader
-// ones in the same family. Prices drift; this table needs periodic review.
-const PRICING_DEFAULT = { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 };
-const PRICING_TABLE = [
-  { match: "claude-opus-4", input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
-  { match: "claude-sonnet-4", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
-  { match: "claude-haiku-4", input: 1, output: 5, cache_read: 0.1, cache_write: 1.25 },
-  { match: "claude-3-opus", input: 15, output: 75, cache_read: 1.5, cache_write: 18.75 },
-  { match: "claude-3-7-sonnet", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
-  { match: "claude-3-5-sonnet", input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
-  { match: "claude-3-5-haiku", input: 0.8, output: 4, cache_read: 0.08, cache_write: 1 },
-  { match: "claude-3-haiku", input: 0.25, output: 1.25, cache_read: 0.03, cache_write: 0.3 },
-  { match: "gpt-5", input: 1.25, output: 10, cache_read: 0.625, cache_write: 1.25 },
-  { match: "gpt-4.1-mini", input: 0.4, output: 1.6, cache_read: 0.2, cache_write: 0.4 },
-  { match: "gpt-4.1-nano", input: 0.1, output: 0.4, cache_read: 0.05, cache_write: 0.1 },
-  { match: "gpt-4.1", input: 2, output: 8, cache_read: 1, cache_write: 2 },
-  { match: "gpt-4o-mini", input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.15 },
-  { match: "gpt-4o", input: 2.5, output: 10, cache_read: 1.25, cache_write: 2.5 },
-  { match: "o3-mini", input: 1.1, output: 4.4, cache_read: 0.55, cache_write: 1.1 },
-  { match: "o3", input: 2, output: 8, cache_read: 1, cache_write: 2 },
-  { match: "o1-mini", input: 1.1, output: 4.4, cache_read: 0.55, cache_write: 1.1 },
-  { match: "o1", input: 15, output: 60, cache_read: 7.5, cache_write: 15 },
-  { match: "gemini-2.5-pro", input: 1.25, output: 10, cache_read: 0.31, cache_write: 1.25 },
-  { match: "gemini-2.5-flash", input: 0.3, output: 2.5, cache_read: 0.075, cache_write: 0.3 },
-  { match: "gemini-1.5-pro", input: 1.25, output: 5, cache_read: 0.3125, cache_write: 1.25 },
-  { match: "gemini-1.5-flash", input: 0.075, output: 0.3, cache_read: 0.01875, cache_write: 0.075 },
-  { match: "gemini", input: 1.25, output: 10, cache_read: 0.31, cache_write: 1.25 },
-  { match: "deepseek", input: 0.28, output: 0.42, cache_read: 0.03, cache_write: 0.28 },
-  { match: "grok", input: 1.25, output: 2.5, cache_read: 0.2, cache_write: 1.25 },
-  { match: "qwen", input: 0.4, output: 1.2, cache_read: 0.1, cache_write: 0.4 },
-  { match: "kimi", input: 0.6, output: 2.5, cache_read: 0.15, cache_write: 0.6 },
-  { match: "llama", input: 0.2, output: 0.2, cache_read: 0.05, cache_write: 0.2 },
-];
-
-function modelPricing(model) {
-  const key = String(model || "").toLowerCase();
-  for (const entry of PRICING_TABLE) {
-    if (key.includes(entry.match)) return entry;
-  }
-  return PRICING_DEFAULT;
-}
 const MIN_INGEST_DATE = "2020-01-01";
 const DEFAULT_MAX_DAILY_TOKENS_PER_SOURCE = 100_000_000_000;
 const OPENROUTER_ANALYTICS_URL = "https://openrouter.ai/api/v1/analytics/query";
@@ -832,6 +789,7 @@ async function connectOpenRouterRoute(request, env, orgRef = "") {
   const body = await readBody(request);
   const key = cleanOpenRouterKey(body.key || body.openrouter_key);
   if (!key) return json({ error: "invalid_openrouter_key" }, 400);
+  const customName = cleanOpenRouterName(body.name || body.label);
   const details = await validateOpenRouterKey(key);
   if (details.error) return json({ error: details.error }, details.status || 400);
   const encrypted = await encryptStoredSecret(env, key);
@@ -850,7 +808,7 @@ async function connectOpenRouterRoute(request, env, orgRef = "") {
       status = 'active',
       last_error = NULL,
       updated_at = excluded.updated_at
-  `).bind(id, target.account.id, user.id, keyHash, encrypted.ciphertext, encrypted.nonce, details.label || "OpenRouter").run();
+  `).bind(id, target.account.id, user.id, keyHash, encrypted.ciphertext, encrypted.nonce, customName || details.label).run();
   const connection = await openRouterConnectionForKey(env, target.account.id, keyHash);
   const sync = await syncOpenRouterConnection(env, connection, { full: true });
   return json({ connection: publicOpenRouterConnection(connection, sync) });
@@ -910,6 +868,7 @@ async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, mac
   if (days.length > MAX_SYNC_DAYS) return { error: "too_many_days", status: 400 };
   const statements = [];
   let skippedDays = 0;
+  let upsertedDays = 0;
   for (const day of days) {
     const date = String(day.date_utc || day.date || "");
     if (!validIngestDate(date)) {
@@ -947,9 +906,45 @@ async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, mac
         updated_by_machine_id = excluded.updated_by_machine_id,
         updated_at = excluded.updated_at
     `).bind(accountID, keyHash, date, input, cacheRead, cacheWrite, output, reasoning, total, records, source, machineID));
+    upsertedDays++;
+
+    if (Array.isArray(day.models)) {
+      const seen = new Set();
+      const modelRows = [];
+      for (const m of day.models.slice(0, MAX_SOURCE_ROWS_PER_DAY)) {
+        if (!m || typeof m !== "object") continue;
+        const model = String(m.model || "").trim().toLowerCase().slice(0, 200);
+        if (!model || seen.has(model)) continue;
+        const mUsage = m.usage || {};
+        const mInput = boundedInt(mUsage.input, MAX_TOKEN_FIELD);
+        const mCacheRead = boundedInt(mUsage.cache_read, MAX_TOKEN_FIELD);
+        const mCacheWrite = boundedInt(mUsage.cache_write, MAX_TOKEN_FIELD);
+        const mOutput = boundedInt(mUsage.output, MAX_TOKEN_FIELD);
+        const mReasoning = boundedInt(mUsage.reasoning, MAX_TOKEN_FIELD);
+        const mExplicitTotal = mUsage.total;
+        const mTotal = mExplicitTotal ? boundedInt(mExplicitTotal, MAX_TOKEN_FIELD) : boundedInt(mInput + mCacheRead + mCacheWrite + mOutput, MAX_TOKEN_FIELD);
+        const mRecords = boundedInt(m.records, MAX_RECORDS_PER_DAY);
+        if ([mInput, mCacheRead, mCacheWrite, mOutput, mReasoning, mTotal, mRecords].some((value) => value === null)) continue;
+        seen.add(model);
+        modelRows.push({ model, records: mRecords, input: mInput, cacheRead: mCacheRead, cacheWrite: mCacheWrite, output: mOutput, reasoning: mReasoning, total: mTotal });
+      }
+      statements.push(...openRouterModelReplaceStatements(env, accountID, keyHash, date, modelRows));
+    }
   }
   if (statements.length) await env.DB.batch(statements);
-  return { upsertedDays: statements.length, skippedDays };
+  return { upsertedDays, skippedDays };
+}
+
+function openRouterModelReplaceStatements(env, accountID, keyHash, date, rows) {
+  const statements = [env.DB.prepare("DELETE FROM openrouter_daily_model_usage WHERE account_id = ? AND openrouter_key_hash = ? AND date_utc = ?").bind(accountID, keyHash, date)];
+  for (const row of rows) {
+    statements.push(env.DB.prepare(`
+      INSERT INTO openrouter_daily_model_usage
+        (account_id, openrouter_key_hash, date_utc, model, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    `).bind(accountID, keyHash, date, row.model, row.records, row.input, row.cacheRead, row.cacheWrite, row.output, row.reasoning, row.total));
+  }
+  return statements;
 }
 
 async function cleanupExpiredRecords(env) {
@@ -989,7 +984,8 @@ async function syncOpenRouterConnection(env, connection, { full = false } = {}) 
     return { error: key.error };
   }
   const start = full || !connection.last_sync_at ? OPENROUTER_SYNC_SINCE : dateOffsetUTC(connection.last_sync_at.slice(0, 10), -7);
-  const days = await fetchOpenRouterUsageDays(key.value, start, tomorrowUTCISO());
+  const end = tomorrowUTCISO();
+  const days = await fetchOpenRouterUsageDays(key.value, start, end);
   if (days.error) {
     await markOpenRouterConnectionError(env, connection.id, days.error);
     return { error: days.error };
@@ -1004,12 +1000,47 @@ async function syncOpenRouterConnection(env, connection, { full = false } = {}) 
     await markOpenRouterConnectionError(env, connection.id, result.error);
     return { error: result.error };
   }
+  await syncOpenRouterModelUsage(env, connection, key.value, start, end);
   await env.DB.prepare(`
     UPDATE openrouter_connections
     SET status = 'active', last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE id = ?
   `).bind(connection.id).run();
   return { ok: true, upserted_days: result.upsertedDays, skipped_days: result.skippedDays };
+}
+
+async function syncOpenRouterModelUsage(env, connection, key, start, end) {
+  try {
+    const result = await fetchOpenRouterModelUsageDays(key, start, end);
+    if (result.error) {
+      console.error("openrouter model sync failed", connection.id, result.error);
+      return;
+    }
+    const byDate = new Map();
+    for (const day of result.days || []) {
+      const date = day.date_utc;
+      if (!validIngestDate(date)) continue;
+      const model = String(day.model || "").trim().toLowerCase().slice(0, 200);
+      if (!model) continue;
+      const usage = day.usage || {};
+      const input = boundedInt(usage.input, MAX_TOKEN_FIELD);
+      const cacheRead = boundedInt(usage.cache_read, MAX_TOKEN_FIELD);
+      const output = boundedInt(usage.output, MAX_TOKEN_FIELD);
+      const reasoning = boundedInt(usage.reasoning, MAX_TOKEN_FIELD);
+      const total = boundedInt(usage.total, MAX_TOKEN_FIELD);
+      const records = boundedInt(day.records, MAX_RECORDS_PER_DAY);
+      if ([input, cacheRead, output, reasoning, total, records].some((value) => value === null)) continue;
+      if (!byDate.has(date)) byDate.set(date, []);
+      byDate.get(date).push({ model, records, input, cacheRead, cacheWrite: 0, output, reasoning, total });
+    }
+    const statements = [];
+    for (const [date, rows] of byDate) {
+      statements.push(...openRouterModelReplaceStatements(env, connection.account_id, connection.openrouter_key_hash, date, rows));
+    }
+    if (statements.length) await env.DB.batch(statements);
+  } catch (error) {
+    console.error("openrouter model sync error", connection.id, error && error.message ? error.message : error);
+  }
 }
 
 async function markOpenRouterConnectionError(env, id, error) {
@@ -1075,6 +1106,70 @@ async function fetchOpenRouterUsageRange(key, start, end) {
   return { days };
 }
 
+async function fetchOpenRouterModelUsageDays(key, start, end) {
+  const startDate = parseUTCDate(start);
+  const endDate = new Date(end);
+  if (!startDate || Number.isNaN(endDate.getTime())) return { error: "openrouter_fetch_failed" };
+  const allDays = [];
+  for (let cursor = new Date(startDate); cursor < endDate;) {
+    const chunkEnd = new Date(cursor);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 366);
+    const effectiveEnd = chunkEnd < endDate ? chunkEnd : endDate;
+    const result = await fetchOpenRouterModelUsageRange(key, cursor.toISOString().slice(0, 10), effectiveEnd.toISOString());
+    if (result.error) return result;
+    allDays.push(...result.days);
+    cursor = effectiveEnd;
+  }
+  return { days: allDays };
+}
+
+// Defensive: the exact response shape for a dimensions:["model"] query hasn't
+// been verified against a live key. Rows missing a recognizable model field are
+// skipped rather than guessed, and any fetch/parse failure is caught by the
+// caller (syncOpenRouterModelUsage) so it never blocks the day-totals sync.
+async function fetchOpenRouterModelUsageRange(key, start, end) {
+  const res = await fetch(OPENROUTER_ANALYTICS_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      metrics: ["request_count", "tokens_prompt", "tokens_completion", "reasoning_tokens", "cached_tokens", "tokens_total"],
+      dimensions: ["model"],
+      granularity: "day",
+      limit: MAX_SYNC_DAYS,
+      time_range: { start: `${start}T00:00:00Z`, end },
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: openRouterError(data, "openrouter_fetch_failed"), status: res.status };
+  const rows = data && data.data && Array.isArray(data.data.data) ? data.data.data : [];
+  const days = [];
+  for (const row of rows) {
+    const rawModel = row.model ?? row.model_permaslug ?? "";
+    const model = String(rawModel).trim().toLowerCase().slice(0, 200);
+    if (!model) continue;
+    const input = int(row.tokens_prompt);
+    const output = int(row.tokens_completion);
+    const reasoning = int(row.reasoning_tokens);
+    const cacheRead = int(row.cached_tokens);
+    days.push({
+      date_utc: String(row.date__day || "").slice(0, 10),
+      model,
+      records: int(row.request_count),
+      usage: {
+        input,
+        output,
+        cache_read: cacheRead,
+        reasoning,
+        total: input + cacheRead + output,
+      },
+    });
+  }
+  return { days };
+}
+
 async function validateOpenRouterKey(key) {
   const res = await fetch(OPENROUTER_KEY_URL, { headers: { "Authorization": `Bearer ${key}` } });
   const data = await res.json().catch(() => ({}));
@@ -1088,6 +1183,12 @@ function safeOpenRouterLabel(value) {
   value = cleanText(value || "OpenRouter", 80);
   if (!value || value.startsWith("sk-or-")) return "OpenRouter";
   return value;
+}
+
+function cleanOpenRouterName(value) {
+  const text = cleanText(value, 80);
+  if (!text || text.startsWith("sk-or-")) return "";
+  return text;
 }
 
 function openRouterError(data, fallback) {
@@ -1141,19 +1242,21 @@ function publicOpenRouterConnection(connection, sync = {}) {
 async function profileStatsRoute(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return json({ error: "not_found" }, 404);
-  const economics = await profileEconomics(env, profile.account);
-  return json({
+  const payload = {
     account: profile.account,
     days: profile.days,
     total_tokens: profile.total_tokens,
     stats: profile.stats,
     member_count: profile.member_count,
     embed_url: profile.embed_url,
-    by_cli: economics.byTool,
-    top_models: economics.topModels,
-    est_cost_usd: economics.estCostUSD,
     streaks: { current_days: profile.stats.current_streak_days, longest_days: profile.stats.longest_streak_days },
-  }, 200, { "Access-Control-Allow-Origin": "*" });
+  };
+  if (profile.account.show_model_breakdown) {
+    const economics = await profileEconomics(env, profile.account);
+    payload.by_cli = economics.byTool;
+    payload.top_models = economics.topModels;
+  }
+  return json(payload, 200, { "Access-Control-Allow-Origin": "*" });
 }
 
 async function profilePage(request, env, ref) {
@@ -1326,23 +1429,43 @@ async function orgMemberCount(env, orgID) {
 
 async function userSourceRows(env, userID, sinceDate) {
   const rows = await env.DB.prepare(`
-    SELECT s.cli, s.model, SUM(s.total_tokens) AS total_tokens
-    FROM daily_machine_source_usage s
-    JOIN machines mm ON mm.id = s.machine_id
-    WHERE s.user_id = ? AND mm.org_id IS NULL AND s.date_utc >= ?
-    GROUP BY s.cli, s.model
-  `).bind(userID, sinceDate).all();
+    SELECT cli, model, SUM(total_tokens) AS total_tokens
+    FROM (
+      SELECT s.cli, s.model, s.total_tokens
+      FROM daily_machine_source_usage s
+      JOIN machines mm ON mm.id = s.machine_id
+      WHERE s.user_id = ? AND mm.org_id IS NULL AND s.date_utc >= ?
+      UNION ALL
+      SELECT 'openrouter' AS cli, o.model, o.total_tokens
+      FROM openrouter_daily_model_usage o
+      WHERE o.account_id = ? AND o.date_utc >= ?
+    )
+    GROUP BY cli, model
+  `).bind(userID, sinceDate, userID, sinceDate).all();
   return rows.results || [];
 }
 
 async function orgSourceRows(env, orgID, sinceDate) {
   const rows = await env.DB.prepare(`
-    SELECT s.cli, s.model, SUM(s.total_tokens) AS total_tokens
-    FROM daily_machine_source_usage s
-    JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
-    WHERE m.org_id = ? AND s.date_utc >= ?
-    GROUP BY s.cli, s.model
-  `).bind(orgID, sinceDate).all();
+    WITH openrouter_model_rows AS (
+      SELECT o.date_utc, o.openrouter_key_hash, o.model, MAX(o.total_tokens) AS total_tokens
+      FROM openrouter_daily_model_usage o
+      LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
+      WHERE (o.account_id = ? OR m.user_id IS NOT NULL) AND o.date_utc >= ?
+      GROUP BY o.date_utc, o.openrouter_key_hash, o.model
+    )
+    SELECT cli, model, SUM(total_tokens) AS total_tokens
+    FROM (
+      SELECT s.cli, s.model, s.total_tokens
+      FROM daily_machine_source_usage s
+      JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
+      WHERE m.org_id = ? AND s.date_utc >= ?
+      UNION ALL
+      SELECT 'openrouter' AS cli, model, total_tokens
+      FROM openrouter_model_rows
+    )
+    GROUP BY cli, model
+  `).bind(orgID, orgID, sinceDate, orgID, sinceDate).all();
   return rows.results || [];
 }
 
@@ -1365,120 +1488,13 @@ function summarizeSourceRows(rows) {
   return { total, byTool, topModels };
 }
 
-async function userComponentTotals(env, userID) {
-  const row = await env.DB.prepare(`
-    SELECT
-      COALESCE(SUM(input_tokens), 0) AS input,
-      COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
-      COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
-      COALESCE(SUM(output_tokens), 0) AS output
-    FROM (
-      SELECT d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens
-      FROM daily_machine_usage d
-      JOIN machines mm ON mm.id = d.machine_id
-      WHERE d.user_id = ? AND mm.org_id IS NULL
-      UNION ALL
-      SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
-      FROM openrouter_daily_usage
-      WHERE account_id = ?
-    )
-  `).bind(userID, userID).first();
-  return row || { input: 0, cache_read: 0, cache_write: 0, output: 0 };
-}
-
-async function orgComponentTotals(env, orgID) {
-  const row = await env.DB.prepare(`
-    WITH openrouter_rows AS (
-      SELECT o.date_utc, o.openrouter_key_hash,
-        MAX(o.input_tokens) AS input_tokens, MAX(o.cache_read_tokens) AS cache_read_tokens,
-        MAX(o.cache_write_tokens) AS cache_write_tokens, MAX(o.output_tokens) AS output_tokens
-      FROM openrouter_daily_usage o
-      LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
-      WHERE o.account_id = ? OR m.user_id IS NOT NULL
-      GROUP BY o.date_utc, o.openrouter_key_hash
-    )
-    SELECT
-      COALESCE(SUM(input_tokens), 0) AS input,
-      COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
-      COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
-      COALESCE(SUM(output_tokens), 0) AS output
-    FROM (
-      SELECT d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens
-      FROM daily_machine_usage d
-      JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active'
-      WHERE m.org_id = ?
-      UNION ALL
-      SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens FROM openrouter_rows
-    )
-  `).bind(orgID, orgID, orgID).first();
-  return row || { input: 0, cache_read: 0, cache_write: 0, output: 0 };
-}
-
-async function userSegmentComponentRows(env, userID) {
-  const rows = await env.DB.prepare(`
-    SELECT s.model,
-      SUM(s.input_tokens) AS input, SUM(s.cache_read_tokens) AS cache_read,
-      SUM(s.cache_write_tokens) AS cache_write, SUM(s.output_tokens) AS output
-    FROM daily_machine_source_usage s
-    JOIN machines mm ON mm.id = s.machine_id
-    WHERE s.user_id = ? AND mm.org_id IS NULL
-    GROUP BY s.model
-  `).bind(userID).all();
-  return rows.results || [];
-}
-
-async function orgSegmentComponentRows(env, orgID) {
-  const rows = await env.DB.prepare(`
-    SELECT s.model,
-      SUM(s.input_tokens) AS input, SUM(s.cache_read_tokens) AS cache_read,
-      SUM(s.cache_write_tokens) AS cache_write, SUM(s.output_tokens) AS output
-    FROM daily_machine_source_usage s
-    JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
-    WHERE m.org_id = ?
-    GROUP BY s.model
-  `).bind(orgID).all();
-  return rows.results || [];
-}
-
-function estimateCostUSD(componentTotals, segmentRows) {
-  let cost = 0;
-  let segInput = 0;
-  let segCacheRead = 0;
-  let segCacheWrite = 0;
-  let segOutput = 0;
-  for (const row of segmentRows) {
-    const price = modelPricing(row.model);
-    const rowInput = int(row.input);
-    const rowCacheRead = int(row.cache_read);
-    const rowCacheWrite = int(row.cache_write);
-    const rowOutput = int(row.output);
-    cost += (rowInput / 1e6) * price.input + (rowOutput / 1e6) * price.output
-      + (rowCacheRead / 1e6) * price.cache_read + (rowCacheWrite / 1e6) * price.cache_write;
-    segInput += rowInput;
-    segCacheRead += rowCacheRead;
-    segCacheWrite += rowCacheWrite;
-    segOutput += rowOutput;
-  }
-  const remainderInput = Math.max(0, int(componentTotals.input) - segInput);
-  const remainderCacheRead = Math.max(0, int(componentTotals.cache_read) - segCacheRead);
-  const remainderCacheWrite = Math.max(0, int(componentTotals.cache_write) - segCacheWrite);
-  const remainderOutput = Math.max(0, int(componentTotals.output) - segOutput);
-  cost += (remainderInput / 1e6) * PRICING_DEFAULT.input + (remainderOutput / 1e6) * PRICING_DEFAULT.output
-    + (remainderCacheRead / 1e6) * PRICING_DEFAULT.cache_read + (remainderCacheWrite / 1e6) * PRICING_DEFAULT.cache_write;
-  return cost;
-}
-
 async function profileEconomics(env, account) {
+  if (!account.show_model_breakdown) return { hasBreakdown: false, byTool: [], topModels: [] };
   const since = sameDatePreviousYear(todayUTCDate()).toISOString().slice(0, 10);
   const isOrg = account.kind === "org";
-  const [sourceRows, componentTotals, segmentComponentRows] = await Promise.all([
-    isOrg ? orgSourceRows(env, account.id, since) : userSourceRows(env, account.id, since),
-    isOrg ? orgComponentTotals(env, account.id) : userComponentTotals(env, account.id),
-    isOrg ? orgSegmentComponentRows(env, account.id) : userSegmentComponentRows(env, account.id),
-  ]);
+  const sourceRows = isOrg ? await orgSourceRows(env, account.id, since) : await userSourceRows(env, account.id, since);
   const breakdown = summarizeSourceRows(sourceRows);
-  const estCostUSD = estimateCostUSD(componentTotals, segmentComponentRows);
-  return { hasBreakdown: sourceRows.length > 0, byTool: breakdown.byTool, topModels: breakdown.topModels, estCostUSD };
+  return { hasBreakdown: sourceRows.length > 0, byTool: breakdown.byTool, topModels: breakdown.topModels };
 }
 
 const LEADERBOARD_LIMIT = 50;
@@ -1591,10 +1607,10 @@ async function cachedLeaderboard(env, range) {
 }
 
 async function updateAccountMetadata(env, accountID, fields) {
-  const columns = ["bio", "website_url", "github_url", "x_url"].filter((key) => key in fields);
+  const columns = ["bio", "website_url", "github_url", "x_url", "show_model_breakdown"].filter((key) => key in fields);
   if (!columns.length) return;
   const assignments = columns.map((key) => `${key} = ?`).join(", ");
-  const values = columns.map((key) => fields[key] || null);
+  const values = columns.map((key) => (key === "show_model_breakdown" ? (fields[key] ? 1 : 0) : fields[key] || null));
   await env.DB.prepare(`UPDATE accounts SET ${assignments} WHERE id = ?`).bind(...values, accountID).run();
 }
 
@@ -1777,7 +1793,7 @@ function machineCanSyncToAccount(machine, account) {
 
 async function accountView(env, id) {
   return env.DB.prepare(`
-    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.created_at, h.handle
+    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.show_model_breakdown, a.created_at, h.handle
     FROM accounts a
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE a.id = ?
@@ -1789,7 +1805,7 @@ async function resolveAccount(env, ref) {
   if (!ref) return null;
   if (ref.length > 80) return null;
   return env.DB.prepare(`
-    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.created_at, h.handle
+    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.show_model_breakdown, a.created_at, h.handle
     FROM accounts a
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE a.account_number = ? OR h.handle = ?
@@ -2014,7 +2030,7 @@ async function orgsPage(request, env) {
   const account = await accountView(env, user.id);
   const profileRef = account.handle || account.account_number;
   const orgs = await env.DB.prepare(`
-    SELECT a.id, a.account_number, h.handle, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, m.role
+    SELECT a.id, a.account_number, h.handle, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.show_model_breakdown, m.role
     FROM memberships m
     JOIN accounts a ON a.id = m.org_id
     LEFT JOIN handles h ON h.account_id = a.id
@@ -2086,6 +2102,11 @@ function profileMetadataForm(account, { kind, ref = "" }) {
       <label class="field-inline" for="${esc(prefix)}-github"><span>GitHub</span><input id="${esc(prefix)}-github" name="github_url" placeholder="github.com/username" value="${esc(account.github_url || "")}"></label>
       <label class="field-inline" for="${esc(prefix)}-x"><span>X.com</span><input id="${esc(prefix)}-x" name="x_url" placeholder="x.com/username" value="${esc(account.x_url || "")}"></label>
     </div>
+    <label class="field-checkbox">
+      <input type="hidden" name="show_model_breakdown" value="false">
+      <input id="${esc(prefix)}-breakdown" type="checkbox" name="show_model_breakdown" value="true"${account.show_model_breakdown ? " checked" : ""}>
+      Show tool &amp; model breakdown on your public profile
+    </label>
     <div class="form-actions"><button type="submit" class="secondary">Save profile details</button><span class="result inline-result" data-profile-result hidden></span></div>
   </form>`;
 }
@@ -2099,7 +2120,11 @@ function openRouterPanel(connections, { kind, ref = "" }) {
     <div class="section-head compact"><div><h3>OpenRouter</h3><p class="muted">Connect a management key to import account token usage hourly.</p></div></div>
     <form class="form-stack" data-openrouter-connect>
       <label for="${esc(prefix)}-key">Management key</label>
-      <div class="form-row"><input id="${esc(prefix)}-key" name="key" type="password" placeholder="sk-or-v1-..." autocomplete="off"><button type="submit" class="secondary">Connect</button></div>
+      <div class="form-row">
+        <input id="${esc(prefix)}-key" name="key" type="password" placeholder="sk-or-v1-..." autocomplete="off">
+        <input id="${esc(prefix)}-name" name="name" type="text" maxlength="80" placeholder="Name (optional)" autocomplete="off">
+        <button type="submit" class="secondary">Connect</button>
+      </div>
     </form>
     <div class="result inline-result" data-openrouter-result hidden></div>
     <div class="list integration-list">${connections.map((connection) => openRouterConnectionRow(connection, kind, ref)).join("") || emptyState("No OpenRouter key connected", "Use a management key. Burnfolio stores it encrypted and imports daily totals only.")}</div>
@@ -2196,7 +2221,6 @@ function profileHtml(profile, isSignedIn = false) {
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
         ${statCard("Longest streak", formatInt(stats.longest_streak_days))}
         ${statCard("Daily average", formatCompact(stats.average_active_day_tokens), "on active days")}
-        ${profile.economics ? statCard("Est. API value", `≈ ${formatUSD(profile.economics.estCostUSD)}`, "at public API list prices", "Estimated from public per-model API list prices. Not a bill — actual plan pricing, discounts, and self-hosted models vary.") : ""}
       </section>
       ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
       ${heatmapYears(profile.days).length > 1 ? heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" }) : ""}
@@ -2237,10 +2261,9 @@ function profileLinks(account) {
 function shareCopy(profile, displayName) {
   const stats = profile.stats;
   const best = stats.best_day ? ` Best day: ${formatCompact(stats.best_day_tokens)} tokens.` : "";
-  const cost = profile.economics && profile.economics.estCostUSD > 0 ? ` ≈ ${formatUSD(profile.economics.estCostUSD)} at API list prices.` : "";
   const equivalence = shareEquivalence(profile.total_tokens);
   const equivalenceLine = equivalence ? ` ${equivalence}.` : "";
-  return `${displayName} burned ${formatInt(profile.total_tokens)} AI tokens across ${formatInt(stats.active_days)} active days.${best}${cost}${equivalenceLine} Show your burn.`;
+  return `${displayName} burned ${formatInt(profile.total_tokens)} AI tokens across ${formatInt(stats.active_days)} active days.${best}${equivalenceLine} Show your burn.`;
 }
 
 function shareDialog(imageURL, text) {
@@ -2673,6 +2696,7 @@ function howWeCountPage(isSignedIn = false) {
           <p>Each square represents the total tokens Burnfolio has received for that day. Higher totals render hotter cells.</p>
           <p>A day's total is input + cache read + cache write + output tokens. Reasoning tokens are informational only and are not added to the total, since providers generally already include them in the output count.</p>
           <p>Each source (a machine or an OpenRouter connection) is capped at a configurable per-day ceiling to keep a single misconfigured client from distorting a graph. Raw usage is always stored; only the displayed total is capped.</p>
+          <p>A profile can also show a per-tool and per-model breakdown of its burn ("What's burning"). It's off by default — the profile owner turns it on from their dashboard, and it's the only piece of usage detail that's opt-in rather than shown automatically.</p>
         </article>
         <article class="learn-card">
           <h2>What does not count</h2>
@@ -2693,13 +2717,8 @@ function howWeCountPage(isSignedIn = false) {
           <p>Syncs are idempotent by day, tool, model, machine, and profile. Re-running <code>pyro</code> updates totals instead of adding the same local records again.</p>
         </article>
         <article class="learn-card">
-          <h2>How we estimate cost</h2>
-          <p>"Est. API value" matches each machine's per-tool, per-model token counts against a table of public per-model API list prices (input, output, and cached-token rates), and prices any unmatched usage at a blended default rate.</p>
-          <p>It's an estimate of what the same usage would cost at public list prices, not a bill. It ignores subscription plans, volume discounts, batch pricing, and self-hosted models, and our price table is a periodically-updated snapshot rather than a live feed.</p>
-        </article>
-        <article class="learn-card">
           <h2>API</h2>
-          <p><code>GET /api/profiles/:ref/stats</code> returns a profile's public data as JSON: the daily token series, current and longest streaks, per-tool and per-model breakdowns (when available), and the estimated API value. No authentication required — it's the same data shown on the public profile page.</p>
+          <p><code>GET /api/profiles/:ref/stats</code> returns a profile's public data as JSON: the daily token series, current and longest streaks, and per-tool/per-model breakdowns when the profile owner has turned that on. No authentication required — it's the same data shown on the public profile page.</p>
           <p><code>GET /api/leaderboard?range=all|7d</code> returns the current leaderboard as JSON.</p>
         </article>
       </section>
@@ -2732,7 +2751,7 @@ function privacyPage(isSignedIn = false) {
         <article class="learn-card">
           <h2>What we collect</h2>
           <p>Per synced day, per machine or OpenRouter connection: the date, a request count, and six token counters (input, cache read, cache write, output, reasoning, and total).</p>
-          <p><code>pyro</code> also computes a per-CLI and per-model breakdown of those same six counters locally and includes it in the sync payload. We store that breakdown too — it's still counts only, per tool and per model, per day; no prompts, file paths, or session identifiers are ever part of it.</p>
+          <p><code>pyro</code> also computes a per-CLI and per-model breakdown of those same six counters locally and includes it in the sync payload. We store that breakdown too — it's still counts only, per tool and per model, per day; no prompts, file paths, or session identifiers are ever part of it. This breakdown is only shown on your public profile if you turn it on; it's off by default.</p>
           <p>Account data: an account number and key, an optional email address (for magic-link sign-in and recovery), an optional handle, and any bio or profile links you choose to add.</p>
           <p>OpenRouter keys you connect from the dashboard are encrypted at rest. Keys <code>pyro</code> imports from your local OpenRouter config never leave your machine — only a SHA-256 fingerprint of the key and daily usage totals are uploaded.</p>
         </article>
@@ -2986,15 +3005,6 @@ function shareEquivalence(totalTokens) {
     }
   }
   return "";
-}
-
-function formatUSD(value) {
-  value = Math.max(0, Number(value) || 0);
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1000) return `$${(value / 1000).toFixed(1)}k`;
-  if (value >= 1) return `$${value.toFixed(0)}`;
-  if (value > 0) return `$${value.toFixed(2)}`;
-  return "$0";
 }
 
 function snippet(label, code) {
@@ -4174,6 +4184,7 @@ function cleanProfileMetadata(body) {
     if (x === null) return { error: "invalid_url" };
     fields.x_url = x;
   }
+  if ("show_model_breakdown" in body) fields.show_model_breakdown = body.show_model_breakdown === true || body.show_model_breakdown === "true";
   return fields;
 }
 

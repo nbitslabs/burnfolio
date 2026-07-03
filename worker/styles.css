@@ -1304,6 +1304,19 @@ body.share-open {
 .field-inline input {
   width: 100%;
 }
+.field-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--burnfolio-ash);
+  font-size: 13px;
+  font-weight: 700;
+}
+.field-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--burnfolio-flame-deep);
+}
 .form-actions {
   display: flex;
   align-items: center;
