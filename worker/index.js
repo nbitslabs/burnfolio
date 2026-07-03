@@ -3981,6 +3981,7 @@ function siteFooter() {
   return `<footer class="site-footer">
     <div class="site-footer-links">
       <a href="https://github.com/nbitslabs/burnfolio" rel="noopener noreferrer" target="_blank">GitHub</a>
+      <a href="https://x.com/burnfolio_a" rel="noopener noreferrer" target="_blank">X</a>
       <a href="/leaderboard">Leaderboard</a>
       <a href="/badges">Badges</a>
       <a href="/how-we-count">How we count</a>
