@@ -78,7 +78,7 @@ async function route(request, env) {
   if (path === "/og/landing.png") return assetResponse("og-landing.png");
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
-  if (path === "/") return html(homePage(await signedIn(request, env), await globalStats(request, env), await platformStats(env), await cachedRecentSyncs(env)));
+  if (path === "/") return html(homePage(await signedIn(request, env), await globalStats(request, env), await platformStats(env), await cachedRecentActivity(env)));
   if (path === "/signup") return authRoute(request, env, "signup");
   if (path === "/signin") return authRoute(request, env, "signin");
   if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
@@ -102,7 +102,7 @@ async function route(request, env) {
   if (path === "/api/me/export.json" && (request.method === "GET" || request.method === "HEAD")) return meExportRoute(request, env);
   if (path === "/api/me/delete" && request.method === "POST") return deleteAccountRoute(request, env);
   if (path === "/api/global/stats" && (request.method === "GET" || request.method === "HEAD")) return globalStatsResponse(request, env);
-  if (path === "/api/global/recent" && (request.method === "GET" || request.method === "HEAD")) return recentSyncsRoute(request, env);
+  if (path === "/api/global/recent" && (request.method === "GET" || request.method === "HEAD")) return recentActivityRoute(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/profile" && request.method === "PATCH") return updateUserProfileRoute(request, env);
   if (path === "/api/openrouter/ingest" && request.method === "POST") return ingestOpenRouter(request, env);
@@ -126,6 +126,7 @@ async function route(request, env) {
   if (path.match(/^\/embed\/[^/]+\.svg$/)) return embedSVGPage(request, env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/embed\/[^/]+$/)) return embedPage(request, env, decodeURIComponent(path.split("/")[2]));
   if (path.match(/^\/embed\/[^/]+\/script\.js$/)) return embedScript(request, decodeURIComponent(path.split("/")[2]));
+  if (path.match(/^\/[A-Za-z0-9][A-Za-z0-9_-]{2,31}\/badges$/)) return profileBadgesPage(request, env, path.split("/")[1]);
   if (path.match(/^\/[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/)) return profilePage(request, env, path.slice(1));
 
   return html(notFoundPage(await signedIn(request, env)), 404);
@@ -517,6 +518,7 @@ async function deleteAccountRoute(request, env) {
     env.DB.prepare("DELETE FROM openrouter_daily_usage WHERE account_id = ?").bind(account.id),
     env.DB.prepare("DELETE FROM openrouter_connections WHERE owner_user_id = ? OR account_id = ?").bind(user.id, account.id),
     env.DB.prepare("DELETE FROM memberships WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM account_badges WHERE account_id = ?").bind(account.id),
     env.DB.prepare("DELETE FROM handles WHERE account_id = ?").bind(account.id),
     env.DB.prepare("DELETE FROM users WHERE id = ?").bind(user.id),
     env.DB.prepare("DELETE FROM accounts WHERE id = ?").bind(account.id),
@@ -649,31 +651,65 @@ function emptyGlobalStats() {
 }
 
 // Anonymized: only a token total and a timestamp, never account/machine/handle.
-async function recentSyncs(env) {
+const RECENT_ACTIVITY_LIMIT = 6;
+
+// Anonymous sync events (tokens + timestamp only) merged with attributed badge
+// earns (badges are public — the earner's ref is shown), newest first, capped
+// at RECENT_ACTIVITY_LIMIT. Each entry carries a `type` so the renderer (server
+// and client) can distinguish them.
+async function recentActivity(env) {
   const clamp = dailyTokenClamp(env);
-  const rows = await env.DB.prepare(`
-    SELECT MIN(total_tokens, ?) AS total_tokens, updated_at
-    FROM daily_machine_usage
-    WHERE total_tokens > 0
-    ORDER BY updated_at DESC
-    LIMIT 5
-  `).bind(clamp).all();
-  return (rows.results || []).map((r) => ({ total_tokens: int(r.total_tokens), tokens_display: formatCompact(int(r.total_tokens)), updated_at: r.updated_at }));
+  const [syncRows, badgeRows] = await Promise.all([
+    env.DB.prepare(`
+      SELECT MIN(total_tokens, ?) AS total_tokens, updated_at
+      FROM daily_machine_usage
+      WHERE total_tokens > 0
+      ORDER BY updated_at DESC
+      LIMIT 5
+    `).bind(clamp).all(),
+    env.DB.prepare(`
+      SELECT ab.badge_key, ab.earned_at, a.account_number, h.handle, a.display_name
+      FROM account_badges ab
+      JOIN accounts a ON a.id = ab.account_id
+      LEFT JOIN handles h ON h.account_id = a.id
+      ORDER BY ab.earned_at DESC
+      LIMIT 5
+    `).all(),
+  ]);
+  const syncs = (syncRows.results || []).map((r) => ({
+    type: "sync",
+    total_tokens: int(r.total_tokens),
+    tokens_display: formatCompact(int(r.total_tokens)),
+    at: r.updated_at,
+  }));
+  const badges = (badgeRows.results || []).map((r) => {
+    const def = badgeDef(r.badge_key);
+    if (!def) return null;
+    const ref = r.handle || "Anonymous builder";
+    return {
+      type: "badge",
+      badge_name: def.name,
+      badge_tier: def.tier,
+      ref,
+      at: r.earned_at,
+    };
+  }).filter(Boolean);
+  return [...syncs, ...badges].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, RECENT_ACTIVITY_LIMIT);
 }
 
-async function cachedRecentSyncs(env) {
+async function cachedRecentActivity(env) {
   const cacheKey = new Request("https://cache.internal/global/recent");
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
   if (cached) return cached.json();
-  const rows = await recentSyncs(env);
+  const rows = await recentActivity(env);
   const response = json(rows, 200, { "Cache-Control": "public, max-age=60" });
   await cache.put(cacheKey, response.clone());
   return rows;
 }
 
-async function recentSyncsRoute(request, env) {
-  const rows = await cachedRecentSyncs(env);
+async function recentActivityRoute(request, env) {
+  const rows = await cachedRecentActivity(env);
   return json(rows, 200, { "Cache-Control": "public, max-age=60", "Access-Control-Allow-Origin": "*" });
 }
 
@@ -1026,6 +1062,8 @@ async function ingest(request, env) {
   }
   if (statements.length) await env.DB.batch(statements);
   await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_pyro_version = ? WHERE id = ?").bind(pyroVersion || null, machine.id).run();
+  await awardBadgesForAccountID(env, machine.user_id);
+  if (machine.org_id) await awardBadgesForAccountID(env, machine.org_id);
   return json({ ok: true, upserted_days: upsertedDays, skipped_days: skippedDays });
 }
 
@@ -1054,6 +1092,7 @@ async function ingestOpenRouter(request, env) {
   });
   if (result.error) return json({ error: result.error }, result.status || 400);
   await env.DB.prepare("UPDATE machines SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(machine.id).run();
+  await awardBadgesForAccountID(env, account.id);
   return json({ ok: true, upserted_days: result.upsertedDays, skipped_days: result.skippedDays });
 }
 
@@ -1292,6 +1331,7 @@ async function syncOpenRouterConnection(env, connection, { full = false } = {}) 
     SET status = 'active', last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE id = ?
   `).bind(connection.id).run();
+  await awardBadgesForAccountID(env, connection.account_id);
   return { ok: true, upserted_days: result.upsertedDays, skipped_days: result.skippedDays };
 }
 
@@ -1534,20 +1574,57 @@ const BADGE_TIERS = { common: "Base Model", uncommon: "Fine-Tune", rare: "Fronti
 const BADGE_TIER_ORDER = ["rare", "uncommon", "common"];
 
 const BADGE_DEFS = [
+  // --- Base Model (common) ---
   { key: "hello_world", name: "Hello, World", tier: "common", description: "Every run starts with a single token.", check: (s) => s.lifetimeTokens > 0 },
+  { key: "tokenizer", name: "Tokenizer", tier: "common", description: "Your first million. The vocabulary is warm.", check: (s) => s.lifetimeTokens >= 1_000_000 },
+  { key: "context_builder", name: "Context Builder", tier: "common", description: "Ten million tokens in. It's becoming a habit.", check: (s) => s.lifetimeTokens >= 10_000_000 },
   { key: "warm_cache", name: "Warm Cache", tier: "common", description: "One hundred million tokens. The KV cache remembers you now.", check: (s) => s.lifetimeTokens >= 100_000_000 },
   { key: "training_loop", name: "Training Loop", tier: "common", description: "Seven consecutive days. The loss curve is trending down.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 7 },
   { key: "multi_agent", name: "Multi-Agent", tier: "common", description: "Three agents, one human in the loop. Allegedly.", check: (s) => s.distinctTools >= 3 },
   { key: "model_collector", name: "Model Collector", tier: "common", description: "Gotta prompt 'em all.", check: (s) => s.distinctModels >= 5 },
   { key: "always_on", name: "Always On", tier: "common", description: "Uptime rivaling the API you call.", check: (s) => s.activeDays >= 30 },
+  { key: "wordsmith", name: "Wordsmith", tier: "common", description: "Ten million tokens generated. Some of them compiled.", check: (s) => s.outputTokens >= 10_000_000 },
+  { key: "context_stuffer", name: "Context Stuffer", tier: "common", description: "Everything is relevant context if you believe hard enough.", check: (s) => s.inputTokens >= 50_000_000 },
+  { key: "chain_of_thought", name: "Chain of Thought", tier: "common", description: "Let's think step by step.", check: (s) => s.reasoningTokens >= 1_000_000 },
+  { key: "chatterbox", name: "Chatterbox", tier: "common", description: "A thousand requests. It remembers you fondly. Probably.", check: (s) => s.records >= 1_000 },
+  { key: "fortnight", name: "Fortnight", tier: "common", description: "Two weeks in the loop. No checkpoint needed.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 14 },
+  { key: "pair_programmer", name: "Pair Programmer", tier: "common", description: "Two agents, four hands, one merge conflict.", check: (s) => s.distinctTools >= 2 },
+  { key: "weekend_warrior", name: "Weekend Warrior", tier: "common", description: "Shipping doesn't check the calendar.", check: (s) => s.weekendActiveDays >= 10 },
+  { key: "open_book", name: "Open Book", tier: "common", description: "Alignment through transparency.", check: (s) => s.hasBioAndLink },
+  { key: "team_player", name: "Team Player", tier: "common", description: "Multi-agent systems work better with trust.", check: (s) => s.hasActiveOrgMembership },
+  { key: "router", name: "The Router", tier: "common", description: "All roads lead through you.", check: (s) => s.hasOpenRouterUsage },
 
+  // --- Fine-Tune (uncommon) ---
   { key: "billion_token_brain", name: "Billion-Token Brain", tier: "uncommon", description: "Enough tokens to pretrain a very small, very confused model.", check: (s) => s.lifetimeTokens >= 1_000_000_000 },
   { key: "epoch", name: "Epoch", tier: "uncommon", description: "One full pass over the month. No early stopping.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 30 },
   { key: "overclocked", name: "Overclocked", tier: "uncommon", description: "Your fans are audible from space.", check: (s) => s.bestDayTokens >= 100_000_000 },
   { key: "orchestrator", name: "Orchestrator", tier: "uncommon", description: "You don't write code anymore. You conduct it.", check: (s) => s.distinctTools >= 5 },
   { key: "ensemble", name: "Ensemble", tier: "uncommon", description: "Ten models polled. Consensus pending.", check: (s) => s.distinctModels >= 10 },
   { key: "cache_whisperer", name: "Cache Whisperer", tier: "uncommon", description: "Half your context came straight from cache. The bill thanks you.", check: (s) => s.cacheReadTokens >= 10_000_000 && s.cacheReadTokens >= 0.5 * (s.inputTokens + s.cacheReadTokens) },
+  { key: "novelist", name: "Novelist", tier: "uncommon", description: "A hundred million tokens out. War and Peace, 120 times, in one sitting.", check: (s) => s.outputTokens >= 100_000_000 },
+  { key: "context_maximalist", name: "Context Maximalist", tier: "uncommon", description: "Why summarize when you can paste?", check: (s) => s.inputTokens >= 500_000_000 },
+  { key: "cache_architect", name: "Cache Architect", tier: "uncommon", description: "You build the cache other people read from.", check: (s) => s.cacheWriteTokens >= 100_000_000 },
+  { key: "deliberator", name: "The Deliberator", tier: "uncommon", description: "A hundred million tokens of thinking. The answer was 4.", check: (s) => s.reasoningTokens >= 100_000_000 },
+  { key: "api_hammer", name: "API Hammer", tier: "uncommon", description: "When all you have is an API key, everything looks like a request.", check: (s) => s.records >= 10_000 },
+  { key: "half_life", name: "Half-Life", tier: "uncommon", description: "Fifty consecutive days. Still no crowbar.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 50 },
+  { key: "habitual", name: "Habitual", tier: "uncommon", description: "A hundred days of burn. This is your workflow now.", check: (s) => s.activeDays >= 100 },
+  { key: "polyglot", name: "Polyglot", tier: "uncommon", description: "Fifteen models. You speak fluent everything.", check: (s) => s.distinctModels >= 15 },
+  { key: "provider_hopper", name: "Provider Hopper", tier: "uncommon", description: "Vendor lock-in is a state of mind.", check: (s) => s.distinctProviders >= 3 },
+  { key: "perfect_attendance", name: "Perfect Attendance", tier: "uncommon", description: "One month, zero gaps. The cron job is jealous.", check: (s) => s.hasPerfectMonth },
+  { key: "four_seasons", name: "Four Seasons", tier: "uncommon", description: "A full trip around the sun, one burn at a time.", check: (s) => s.distinctActiveMonths >= 12 },
+  { key: "badge_collector", name: "Badge Collector", tier: "uncommon", description: "Achievement unlocked: achievements.", meta: true, metaThreshold: 10 },
+  {
+    key: "leet",
+    name: "1337",
+    tier: "uncommon",
+    secret: true,
+    description: "Nice. (You know what you did.)",
+    secretName: "???",
+    secretDescription: "Some numbers speak for themselves.",
+    check: (s) => String(s.lifetimeTokens).includes("1337") || String(s.bestDayTokens).includes("1337"),
+  },
 
+  // --- Frontier (rare) ---
   { key: "pretraining_run", name: "Pretraining Run", tier: "rare", description: "That's not usage. That's a dataset.", check: (s) => s.lifetimeTokens >= 10_000_000_000 },
   { key: "foundation_model", name: "Foundation Model", tier: "rare", description: "Please disclose your training data.", check: (s) => s.lifetimeTokens >= 100_000_000_000 },
   { key: "convergence", name: "Convergence", tier: "rare", description: "One hundred days in the loop. Gradient fully descended.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 100 },
@@ -1563,6 +1640,13 @@ const BADGE_DEFS = [
     secretDescription: "Some questions answer themselves.",
     check: (s) => s.activeDays === 42 || s.currentStreak === 42 || s.longestStreak === 42,
   },
+  { key: "superintelligence", name: "Superintelligence", tier: "rare", description: "One trillion tokens. We are legally required to mention safety.", check: (s) => s.lifetimeTokens >= 1_000_000_000_000 },
+  { key: "printing_press", name: "Printing Press", tier: "rare", description: "A billion tokens generated. Gutenberg walked so you could prompt.", check: (s) => s.outputTokens >= 1_000_000_000 },
+  { key: "librarian", name: "The Librarian", tier: "rare", description: "You didn't read the docs. You fed them.", check: (s) => s.inputTokens >= 5_000_000_000 },
+  { key: "rate_limit_tourist", name: "Rate Limit Tourist", tier: "rare", description: "On a first-name basis with HTTP 429.", check: (s) => s.records >= 100_000 },
+  { key: "year_of_burn", name: "Year of Burn", tier: "rare", description: "A full year, every single day. Touch grass. (Badge includes grass.)", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 365 },
+  { key: "lifer", name: "Lifer", tier: "rare", description: "Two hundred and fifty days. The context window of a lifetime.", check: (s) => s.activeDays >= 250 },
+  { key: "completionist", name: "Completionist", tier: "rare", description: "You optimized the reward function.", meta: true, metaThreshold: 40 },
 ];
 
 function badgeDef(key) {
@@ -1573,163 +1657,320 @@ function badgeTooltip(def) {
   return `${BADGE_TIERS[def.tier]} · ${def.name} badge`;
 }
 
-function computeBadges(statsBundle) {
-  return BADGE_DEFS.filter((b) => b.check(statsBundle)).map((b) => b.key);
+// Non-meta badges whose check() is satisfied right now. Meta badges
+// (badge_collector, completionist) are evaluated separately by awardBadges,
+// against the account's earned-row count, not this bundle.
+function computeEarnableBadges(statsBundle) {
+  return BADGE_DEFS.filter((b) => !b.meta && b.check(statsBundle)).map((b) => b.key);
 }
 
 // Nearest-progress fraction toward an unearned badge, for the dashboard goals panel.
 function badgeProgress(def, statsBundle) {
   const s = statsBundle;
   switch (def.key) {
+    case "tokenizer": return s.lifetimeTokens / 1_000_000;
+    case "context_builder": return s.lifetimeTokens / 10_000_000;
     case "warm_cache": return s.lifetimeTokens / 100_000_000;
     case "training_loop": return Math.max(s.currentStreak, s.longestStreak) / 7;
     case "multi_agent": return s.distinctTools / 3;
     case "model_collector": return s.distinctModels / 5;
     case "always_on": return s.activeDays / 30;
+    case "wordsmith": return s.outputTokens / 10_000_000;
+    case "context_stuffer": return s.inputTokens / 50_000_000;
+    case "chain_of_thought": return s.reasoningTokens / 1_000_000;
+    case "chatterbox": return s.records / 1_000;
+    case "fortnight": return Math.max(s.currentStreak, s.longestStreak) / 14;
+    case "pair_programmer": return s.distinctTools / 2;
+    case "weekend_warrior": return s.weekendActiveDays / 10;
+    case "open_book": return s.hasBioAndLink ? 1 : 0;
+    case "team_player": return s.hasActiveOrgMembership ? 1 : 0;
+    case "router": return s.hasOpenRouterUsage ? 1 : 0;
     case "billion_token_brain": return s.lifetimeTokens / 1_000_000_000;
     case "epoch": return Math.max(s.currentStreak, s.longestStreak) / 30;
     case "overclocked": return s.bestDayTokens / 100_000_000;
     case "orchestrator": return s.distinctTools / 5;
     case "ensemble": return s.distinctModels / 10;
     case "cache_whisperer": return Math.min(s.cacheReadTokens / 10_000_000, (s.cacheReadTokens || 0) / Math.max(0.5 * (s.inputTokens + s.cacheReadTokens), 1));
+    case "novelist": return s.outputTokens / 100_000_000;
+    case "context_maximalist": return s.inputTokens / 500_000_000;
+    case "cache_architect": return s.cacheWriteTokens / 100_000_000;
+    case "deliberator": return s.reasoningTokens / 100_000_000;
+    case "api_hammer": return s.records / 10_000;
+    case "half_life": return Math.max(s.currentStreak, s.longestStreak) / 50;
+    case "habitual": return s.activeDays / 100;
+    case "polyglot": return s.distinctModels / 15;
+    case "provider_hopper": return s.distinctProviders / 3;
+    case "perfect_attendance": return s.hasPerfectMonth ? 1 : 0;
+    case "four_seasons": return s.distinctActiveMonths / 12;
     case "pretraining_run": return s.lifetimeTokens / 10_000_000_000;
     case "foundation_model": return s.lifetimeTokens / 100_000_000_000;
     case "convergence": return Math.max(s.currentStreak, s.longestStreak) / 100;
     case "datacenter_cosplay": return s.bestDayTokens / 1_000_000_000;
     case "mixture_of_experts": return s.distinctModels / 25;
+    case "superintelligence": return s.lifetimeTokens / 1_000_000_000_000;
+    case "printing_press": return s.outputTokens / 1_000_000_000;
+    case "librarian": return s.inputTokens / 5_000_000_000;
+    case "rate_limit_tourist": return s.records / 100_000;
+    case "year_of_burn": return Math.max(s.currentStreak, s.longestStreak) / 365;
+    case "lifer": return s.activeDays / 250;
     default: return 0;
   }
 }
 
-// The one extra query per profile view: distinct tool/model counts and
-// lifetime input/cache-read sums, scoped like the existing breakdown queries
-// (userSourceRows/orgSourceRows) but unbounded by date (badges are lifetime).
-async function badgeComponentTotals(env, account) {
+// containing "/" -> provider is the prefix (e.g. "anthropic/claude-3" -> anthropic).
+// Otherwise map bare model-family names to a provider; unrecognized -> null (skipped).
+function modelProvider(model) {
+  const m = String(model || "").trim().toLowerCase();
+  if (!m) return null;
+  if (m.includes("/")) return m.split("/")[0] || null;
+  if (m.startsWith("claude")) return "anthropic";
+  if (m.startsWith("gpt") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("davinci")) return "openai";
+  if (m.startsWith("gemini")) return "google";
+  if (m.startsWith("deepseek")) return "deepseek";
+  if (m.startsWith("qwen")) return "alibaba";
+  if (m.startsWith("kimi") || m.startsWith("moonshot")) return "moonshot";
+  if (m.startsWith("llama")) return "meta";
+  if (m.startsWith("grok")) return "xai";
+  if (m.startsWith("glm")) return "zhipu";
+  if (m.startsWith("mistral") || m.startsWith("mixtral")) return "mistral";
+  return null;
+}
+
+// Weekend-active-day count, "every day of some fully-elapsed calendar month"
+// flag, and distinct-active-calendar-month count, derived from the days array
+// already fetched for the heatmap/stats — no extra query needed.
+function badgeCalendarStats(days) {
+  const active = (days || []).filter((d) => int(d.total_tokens) > 0);
+  let weekendActiveDays = 0;
+  const monthActiveDayCounts = new Map();
+  for (const day of active) {
+    const date = parseUTCDate(day.date_utc);
+    if (!date) continue;
+    const dow = date.getUTCDay();
+    if (dow === 0 || dow === 6) weekendActiveDays++;
+    const ym = day.date_utc.slice(0, 7);
+    monthActiveDayCounts.set(ym, (monthActiveDayCounts.get(ym) || 0) + 1);
+  }
+  const currentYM = todayUTCDate().toISOString().slice(0, 7);
+  let hasPerfectMonth = false;
+  for (const [ym, count] of monthActiveDayCounts) {
+    if (ym >= currentYM) continue; // only fully-elapsed months count as "full calendar month"
+    const [y, mo] = ym.split("-").map(Number);
+    const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    if (count >= daysInMonth) {
+      hasPerfectMonth = true;
+      break;
+    }
+  }
+  return { weekendActiveDays, hasPerfectMonth, distinctActiveMonths: monthActiveDayCounts.size };
+}
+
+// Lifetime day-level component sums (input/cache-read/cache-write/output/
+// reasoning/records) plus whether the account has ever synced any OpenRouter
+// usage — always available regardless of whether per-source segment tracking
+// exists. One UNION ALL CTE aggregated once, rather than paired scalar
+// subqueries per column (far fewer bind params to get wrong).
+async function badgeDayTotals(env, account) {
   if (account.kind === "org") {
     const row = await env.DB.prepare(`
-      WITH org_or_rows AS (
-        SELECT o.input_tokens, o.cache_read_tokens
+      WITH org_openrouter AS (
+        SELECT o.input_tokens, o.cache_read_tokens, o.cache_write_tokens, o.output_tokens, o.reasoning_tokens, o.records
         FROM openrouter_daily_usage o
         LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
         WHERE o.account_id = ? OR m.user_id IS NOT NULL
       ),
-      org_or_model_rows AS (
-        SELECT o.model
+      combined AS (
+        SELECT d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens, d.reasoning_tokens, d.records
+        FROM daily_machine_usage d
+        JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active'
+        WHERE m.org_id = ?
+        UNION ALL
+        SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, records FROM org_openrouter
+      )
+      SELECT
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+        COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+        COALESCE(SUM(records), 0) AS records,
+        EXISTS(SELECT 1 FROM org_openrouter) AS has_openrouter
+      FROM combined
+    `).bind(account.id, account.id, account.id).first();
+    return badgeDayTotalsFromRow(row);
+  }
+  const row = await env.DB.prepare(`
+    WITH combined AS (
+      SELECT d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens, d.reasoning_tokens, d.records
+      FROM daily_machine_usage d
+      JOIN machines mm ON mm.id = d.machine_id
+      WHERE d.user_id = ? AND mm.org_id IS NULL
+      UNION ALL
+      SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, records
+      FROM openrouter_daily_usage WHERE account_id = ?
+    )
+    SELECT
+      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+      COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+      COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+      COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+      COALESCE(SUM(records), 0) AS records,
+      EXISTS(SELECT 1 FROM openrouter_daily_usage WHERE account_id = ?) AS has_openrouter
+    FROM combined
+  `).bind(account.id, account.id, account.id).first();
+  return badgeDayTotalsFromRow(row);
+}
+
+function badgeDayTotalsFromRow(row) {
+  return {
+    inputTokens: int(row && row.input_tokens),
+    cacheReadTokens: int(row && row.cache_read_tokens),
+    cacheWriteTokens: int(row && row.cache_write_tokens),
+    outputTokens: int(row && row.output_tokens),
+    reasoningTokens: int(row && row.reasoning_tokens),
+    records: int(row && row.records),
+    hasOpenRouterUsage: Boolean(row && row.has_openrouter),
+  };
+}
+
+// Distinct (cli, model) segment rows — same scoping as the profile breakdown
+// queries but unbounded by date (badges are lifetime), used to derive distinct
+// tool/model counts and the model-name list for provider inference.
+async function badgeSegmentRows(env, account) {
+  if (account.kind === "org") {
+    const rows = await env.DB.prepare(`
+      SELECT DISTINCT cli, model FROM (
+        SELECT s.cli AS cli, s.model AS model
+        FROM daily_machine_source_usage s
+        JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
+        WHERE m.org_id = ?
+        UNION ALL
+        SELECT 'openrouter' AS cli, o.model
         FROM openrouter_daily_model_usage o
         LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
         WHERE o.account_id = ? OR m.user_id IS NOT NULL
       )
-      SELECT
-        (COALESCE((SELECT SUM(d.input_tokens) FROM daily_machine_usage d JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active' WHERE m.org_id = ?), 0)
-          + COALESCE((SELECT SUM(input_tokens) FROM org_or_rows), 0)) AS input_tokens,
-        (COALESCE((SELECT SUM(d.cache_read_tokens) FROM daily_machine_usage d JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active' WHERE m.org_id = ?), 0)
-          + COALESCE((SELECT SUM(cache_read_tokens) FROM org_or_rows), 0)) AS cache_read_tokens,
-        (SELECT COUNT(DISTINCT cli) FROM (
-          SELECT s.cli AS cli FROM daily_machine_source_usage s JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active' WHERE m.org_id = ?
-          UNION ALL
-          SELECT 'openrouter' AS cli FROM org_or_model_rows
-        )) AS distinct_tools,
-        (SELECT COUNT(DISTINCT model) FROM (
-          SELECT s.model AS model FROM daily_machine_source_usage s JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active' WHERE m.org_id = ?
-          UNION ALL
-          SELECT model FROM org_or_model_rows
-        )) AS distinct_models
-    `).bind(account.id, account.id, account.id, account.id, account.id, account.id, account.id, account.id).first();
-    return {
-      inputTokens: int(row && row.input_tokens),
-      cacheReadTokens: int(row && row.cache_read_tokens),
-      distinctTools: int(row && row.distinct_tools),
-      distinctModels: int(row && row.distinct_models),
-    };
+    `).bind(account.id, account.id, account.id).all();
+    return rows.results || [];
   }
-  const row = await env.DB.prepare(`
-    SELECT
-      (COALESCE((SELECT SUM(d.input_tokens) FROM daily_machine_usage d JOIN machines mm ON mm.id = d.machine_id WHERE d.user_id = ? AND mm.org_id IS NULL), 0)
-        + COALESCE((SELECT SUM(input_tokens) FROM openrouter_daily_usage WHERE account_id = ?), 0)) AS input_tokens,
-      (COALESCE((SELECT SUM(d.cache_read_tokens) FROM daily_machine_usage d JOIN machines mm ON mm.id = d.machine_id WHERE d.user_id = ? AND mm.org_id IS NULL), 0)
-        + COALESCE((SELECT SUM(cache_read_tokens) FROM openrouter_daily_usage WHERE account_id = ?), 0)) AS cache_read_tokens,
-      (SELECT COUNT(DISTINCT cli) FROM (
-        SELECT s.cli AS cli FROM daily_machine_source_usage s JOIN machines mm ON mm.id = s.machine_id WHERE s.user_id = ? AND mm.org_id IS NULL
-        UNION ALL
-        SELECT 'openrouter' AS cli FROM openrouter_daily_model_usage WHERE account_id = ?
-      )) AS distinct_tools,
-      (SELECT COUNT(DISTINCT model) FROM (
-        SELECT s.model AS model FROM daily_machine_source_usage s JOIN machines mm ON mm.id = s.machine_id WHERE s.user_id = ? AND mm.org_id IS NULL
-        UNION ALL
-        SELECT o.model AS model FROM openrouter_daily_model_usage o WHERE o.account_id = ?
-      )) AS distinct_models
-  `).bind(account.id, account.id, account.id, account.id, account.id, account.id, account.id, account.id).first();
-  return {
-    inputTokens: int(row && row.input_tokens),
-    cacheReadTokens: int(row && row.cache_read_tokens),
-    distinctTools: int(row && row.distinct_tools),
-    distinctModels: int(row && row.distinct_models),
-  };
+  const rows = await env.DB.prepare(`
+    SELECT DISTINCT cli, model FROM (
+      SELECT s.cli AS cli, s.model AS model
+      FROM daily_machine_source_usage s
+      JOIN machines mm ON mm.id = s.machine_id
+      WHERE s.user_id = ? AND mm.org_id IS NULL
+      UNION ALL
+      SELECT 'openrouter' AS cli, model FROM openrouter_daily_model_usage WHERE account_id = ?
+    )
+  `).bind(account.id, account.id).all();
+  return rows.results || [];
 }
 
-async function badgeBundleFor(env, account, stats, total) {
-  const totals = await badgeComponentTotals(env, account);
+async function badgeHasActiveOrgMembership(env, account) {
+  if (account.kind === "org") return (await orgMemberCount(env, account.id)) > 1;
+  const row = await env.DB.prepare("SELECT EXISTS(SELECT 1 FROM memberships WHERE user_id = ? AND status = 'active') AS has_membership").bind(account.id).first();
+  return Boolean(row && row.has_membership);
+}
+
+async function badgeBundleFor(env, account, stats, total, days) {
+  const [dayTotals, segmentRows, hasActiveOrgMembership] = await Promise.all([
+    badgeDayTotals(env, account),
+    badgeSegmentRows(env, account),
+    badgeHasActiveOrgMembership(env, account),
+  ]);
+  const distinctTools = new Set(segmentRows.map((r) => r.cli)).size;
+  const distinctModels = new Set(segmentRows.map((r) => r.model)).size;
+  const distinctProviders = new Set(segmentRows.map((r) => modelProvider(r.model)).filter(Boolean)).size;
+  const calendar = badgeCalendarStats(days || []);
   return {
     lifetimeTokens: total,
     bestDayTokens: stats.best_day_tokens,
     activeDays: stats.active_days,
     currentStreak: stats.current_streak_days,
     longestStreak: stats.longest_streak_days,
-    distinctTools: totals.distinctTools,
-    distinctModels: totals.distinctModels,
-    cacheReadTokens: totals.cacheReadTokens,
-    inputTokens: totals.inputTokens,
+    distinctTools,
+    distinctModels,
+    distinctProviders,
+    cacheReadTokens: dayTotals.cacheReadTokens,
+    inputTokens: dayTotals.inputTokens,
+    cacheWriteTokens: dayTotals.cacheWriteTokens,
+    outputTokens: dayTotals.outputTokens,
+    reasoningTokens: dayTotals.reasoningTokens,
+    records: dayTotals.records,
+    hasOpenRouterUsage: dayTotals.hasOpenRouterUsage,
+    weekendActiveDays: calendar.weekendActiveDays,
+    hasPerfectMonth: calendar.hasPerfectMonth,
+    distinctActiveMonths: calendar.distinctActiveMonths,
+    hasBioAndLink: Boolean(account.bio && (account.website_url || account.github_url || account.x_url)),
+    hasActiveOrgMembership,
   };
 }
 
-async function profileBadgeStats(env, profile) {
-  const bundle = await badgeBundleFor(env, profile.account, profile.stats, profile.total_tokens);
-  return { bundle, earned: computeBadges(bundle) };
-}
-
-// The expensive sweep for /badges earned-by counts. There's no practical way
-// to replicate all 18 thresholds (especially streaks) as one SQL pass, so
-// this walks the same nonzero-usage account set the leaderboard ranks —
-// zero-usage accounts can't earn any badge (Hello, World requires >0 tokens)
-// — and is only ever called lazily, cached 15 min.
-async function badgeEarnedCounts(env) {
-  const ranked = await rankedAccountRows(env, "all");
-  const counts = Object.fromEntries(BADGE_DEFS.map((b) => [b.key, 0]));
-  for (const row of ranked) {
-    const account = { id: row.account_id, kind: row.kind };
-    const days = row.kind === "org" ? await orgDays(env, row.account_id) : await userDays(env, row.account_id);
-    const total = days.reduce((sum, d) => sum + d.total_tokens, 0);
-    const stats = profileStats(days, total);
-    const bundle = await badgeBundleFor(env, account, stats, total);
-    for (const key of computeBadges(bundle)) counts[key] = (counts[key] || 0) + 1;
+// Awards: INSERT OR IGNORE any newly-earnable non-meta badges, then cascade
+// the two meta badges (badge_collector, completionist) against the resulting
+// row count. Badges never un-earn — this only ever adds rows. Returns the
+// keys newly inserted in this call (empty on repeat calls once fully caught up).
+async function awardBadges(env, account, statsBundle) {
+  const earnable = computeEarnableBadges(statsBundle);
+  if (!earnable.length) return [];
+  await env.DB.batch(earnable.map((key) =>
+    env.DB.prepare("INSERT OR IGNORE INTO account_badges (account_id, badge_key) VALUES (?, ?)").bind(account.id, key)
+  ));
+  const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM account_badges WHERE account_id = ?").bind(account.id).first();
+  const n = int(countRow && countRow.n);
+  const metaEarnable = BADGE_DEFS.filter((b) => b.meta && n >= b.metaThreshold).map((b) => b.key);
+  if (metaEarnable.length) {
+    await env.DB.batch(metaEarnable.map((key) =>
+      env.DB.prepare("INSERT OR IGNORE INTO account_badges (account_id, badge_key) VALUES (?, ?)").bind(account.id, key)
+    ));
   }
-  return counts;
+  return [...earnable, ...metaEarnable];
 }
 
-async function cachedBadgeEarnedCounts(env) {
-  const cacheKey = new Request("https://cache.internal/badges/counts");
-  const cache = caches.default;
-  const cached = await cache.match(cacheKey);
-  if (cached) return cached.json();
-  const counts = await badgeEarnedCounts(env);
-  const response = json(counts, 200, { "Cache-Control": "public, max-age=900" });
-  await cache.put(cacheKey, response.clone());
+// Single entry point for all three award triggers (ingest, OpenRouter
+// sync/ingest, lazy profile/dashboard view) — re-derives the account and its
+// full stats bundle fresh each time, so it's self-healing by construction.
+async function awardBadgesForAccountID(env, accountID) {
+  const account = await accountView(env, accountID);
+  if (!account) return [];
+  const days = account.kind === "org" ? await orgDays(env, account.id) : await userDays(env, account.id);
+  const total = days.reduce((sum, d) => sum + d.total_tokens, 0);
+  const stats = profileStats(days, total);
+  const bundle = await badgeBundleFor(env, account, stats, total, days);
+  return awardBadges(env, account, bundle);
+}
+
+async function fetchEarnedBadges(env, accountID) {
+  const rows = await env.DB.prepare("SELECT badge_key, earned_at FROM account_badges WHERE account_id = ? ORDER BY earned_at DESC").bind(accountID).all();
+  return rows.results || [];
+}
+
+async function profileBadgeStats(env, profile) {
+  const bundle = await badgeBundleFor(env, profile.account, profile.stats, profile.total_tokens, profile.days);
+  await awardBadges(env, profile.account, bundle); // lazy self-healing catch-up
+  const rows = await fetchEarnedBadges(env, profile.account.id);
+  return { bundle, earned: rows.map((r) => r.badge_key), earnedRows: rows };
+}
+
+// Cheap now that earn state is persisted — a single GROUP BY over account_badges
+// rather than a per-account sweep. No cache: the query is trivial at this scale.
+async function badgeEarnedCountsFromTable(env) {
+  const rows = await env.DB.prepare("SELECT badge_key, COUNT(*) AS n FROM account_badges GROUP BY badge_key").all();
+  const counts = Object.fromEntries(BADGE_DEFS.map((b) => [b.key, 0]));
+  for (const row of rows.results || []) counts[row.badge_key] = int(row.n);
   return counts;
 }
 
 async function badgesPage(request, env) {
   const isSignedIn = await signedIn(request, env);
   const user = await requireUser(request, env);
-  let earnedByViewer = new Set();
+  let earnedByViewer = new Map();
   if (user) {
-    const account = await accountView(env, user.id);
-    const days = await userDays(env, user.id);
-    const total = days.reduce((sum, d) => sum + d.total_tokens, 0);
-    const stats = profileStats(days, total);
-    const bundle = await badgeBundleFor(env, account, stats, total);
-    earnedByViewer = new Set(computeBadges(bundle));
+    const rows = await fetchEarnedBadges(env, user.id);
+    earnedByViewer = new Map(rows.map((r) => [r.badge_key, r.earned_at]));
   }
-  const counts = await cachedBadgeEarnedCounts(env);
+  const counts = await badgeEarnedCountsFromTable(env);
   return html(badgesPageHtml(counts, earnedByViewer, isSignedIn));
 }
 
@@ -1741,7 +1982,7 @@ function badgesPageHtml(counts, earnedByViewer, isSignedIn) {
   }));
   const sections = groups.map((group) => `<section class="badge-tier-group">
     <h2>${esc(group.label)}</h2>
-    <div class="badge-grid">${group.defs.map((def) => badgeCard(def, counts[def.key] || 0, earnedByViewer.has(def.key))).join("")}</div>
+    <div class="badge-grid">${group.defs.map((def) => badgeCard(def, counts[def.key] || 0, earnedByViewer.get(def.key) || null)).join("")}</div>
   </section>`).join("");
   return layout("Badges — Burnfolio", `
     <main class="profile badges-page">
@@ -1749,27 +1990,34 @@ function badgesPageHtml(counts, earnedByViewer, isSignedIn) {
         <div>
           <p class="eyebrow">Achievements</p>
           <h1>Badges</h1>
-          <p class="profile-summary"><span>18 badges across three tiers, computed from real usage: Base Model, Fine-Tune, Frontier.</span></p>
+          <p class="profile-summary"><span>${BADGE_DEFS.length} badges across three tiers, computed from real usage: Base Model, Fine-Tune, Frontier.</span></p>
         </div>
       </header>
       ${sections}
     </main>
   `, {
-    description: "All 18 Burnfolio badges — Base Model, Fine-Tune, and Frontier tiers — with earned-by counts.",
+    description: `All ${BADGE_DEFS.length} Burnfolio badges — Base Model, Fine-Tune, and Frontier tiers — with earned-by counts.`,
     canonical: "https://burnfolio.ai/badges",
     signedIn: isSignedIn,
   });
 }
 
-function badgeCard(def, count, earned) {
+// Small filled medallion, tier color set purely via CSS from the parent's
+// .badge-tier-* class — the same visual atom used everywhere a badge appears.
+function badgeMedallion() {
+  return `<i class="badge-medallion" aria-hidden="true"></i>`;
+}
+
+function badgeCard(def, count, earnedAt) {
   const isSecret = Boolean(def.secret);
   const name = isSecret ? def.secretName : def.name;
   const description = isSecret ? def.secretDescription : def.description;
   const label = `${count} ${count === 1 ? "builder" : "builders"}`;
+  const earned = Boolean(earnedAt);
   return `<div class="badge-card badge-tier-${def.tier}${earned ? " earned" : ""}">
-    <div class="badge-card-head"><i class="badge-dot" aria-hidden="true"></i><strong>${esc(name)}</strong>${earned ? `<span class="badge-earned-check" title="You earned this" aria-label="You earned this">&#10003;</span>` : ""}</div>
+    <div class="badge-card-head">${badgeMedallion()}<strong>${esc(name)}</strong>${earned ? `<span class="badge-earned-check" title="You earned this" aria-label="You earned this">&#10003;</span>` : ""}</div>
     <p>${esc(description)}</p>
-    <p class="badge-earned-count">Earned by ${esc(label)}</p>
+    ${earned ? `<p class="badge-earned-count">Earned ${esc(formatDate(earnedAt.slice(0, 10)))} &middot; earned by ${esc(label)}</p>` : `<p class="badge-earned-count">Earned by ${esc(label)}</p>`}
   </div>`;
 }
 
@@ -1790,10 +2038,10 @@ async function profileStatsRoute(env, ref) {
     payload.by_cli = economics.byTool;
     payload.top_models = economics.topModels;
   }
-  const { earned } = await profileBadgeStats(env, profile);
-  payload.badges = earned.map((key) => {
-    const def = badgeDef(key);
-    return { key, name: def.name, tier: def.tier };
+  const { earnedRows } = await profileBadgeStats(env, profile);
+  payload.badges = earnedRows.map((row) => {
+    const def = badgeDef(row.badge_key);
+    return { key: row.badge_key, name: def.name, tier: def.tier, earned_at: row.earned_at };
   });
   return json(payload, 200, { "Access-Control-Allow-Origin": "*" });
 }
@@ -1804,8 +2052,64 @@ async function profilePage(request, env, ref) {
   if (!profile) return html(notFoundPage(isSignedIn), 404);
   profile.economics = await profileEconomics(env, profile.account);
   profile.percentile = await accountPercentile(env, profile.account.id);
-  profile.badges = (await profileBadgeStats(env, profile)).earned;
+  profile.badgeRows = (await profileBadgeStats(env, profile)).earnedRows;
   return html(profileHtml(profile, isSignedIn));
+}
+
+async function profileBadgesPage(request, env, ref) {
+  const profile = await buildProfile(env, ref);
+  const isSignedIn = await signedIn(request, env);
+  if (!profile) return html(notFoundPage(isSignedIn), 404);
+  const { earnedRows } = await profileBadgeStats(env, profile);
+  return html(profileBadgesHtml(profile, earnedRows, isSignedIn));
+}
+
+function badgeDetailChip(row) {
+  const def = badgeDef(row.badge_key);
+  if (!def) return "";
+  const tip = `${def.description} (${badgeTooltip(def)})`;
+  const dateLabel = formatDate(String(row.earned_at || "").slice(0, 10));
+  return `<div class="badge-chip earned badge-tier-${def.tier}" data-tip="${esc(tip)}" title="${esc(tip)}" tabindex="0">
+    ${badgeMedallion()}
+    <span class="badge-chip-name">${esc(def.name)}</span>
+    <span class="badge-chip-meta"><i class="badge-check" aria-hidden="true">&#10003;</i> Earned ${esc(dateLabel)}</span>
+  </div>`;
+}
+
+function profileBadgesHtml(profile, earnedRows, isSignedIn) {
+  const name = profile.account.handle || profile.account.account_number;
+  const hasHandle = Boolean(profile.account.handle);
+  const hasLabel = Boolean(profile.account.display_name && profile.account.display_name !== "Anonymous builder" && profile.account.display_name !== profile.account.account_number);
+  const displayName = hasHandle ? profile.account.handle : hasLabel ? profile.account.display_name : profile.account.account_number;
+  const groups = BADGE_TIER_ORDER.map((tier) => ({
+    tier,
+    label: BADGE_TIERS[tier],
+    rows: earnedRows.filter((row) => {
+      const def = badgeDef(row.badge_key);
+      return def && def.tier === tier;
+    }),
+  })).filter((group) => group.rows.length);
+  const sections = groups.map((group) => `<section class="badge-tier-group">
+    <h2>${esc(group.label)}</h2>
+    <div class="badge-detail-list">${group.rows.map((row) => badgeDetailChip(row)).join("")}</div>
+  </section>`).join("");
+  const body = earnedRows.length ? sections : emptyState("No badges yet", `${displayName} hasn't earned any badges yet.`);
+  return layout(`${displayName}'s badges — Burnfolio`, `
+    <main class="profile badges-page">
+      <header class="profile-head">
+        <div>
+          <p class="eyebrow"><a href="/${esc(name)}">${esc(displayName)}</a></p>
+          <h1>Badges</h1>
+          <p class="profile-summary"><span>${formatInt(earnedRows.length)} of ${BADGE_DEFS.length} badges earned.</span> <a href="/badges">View the full catalog &rarr;</a></p>
+        </div>
+      </header>
+      ${body}
+    </main>
+  `, {
+    description: `${displayName} has earned ${earnedRows.length} of ${BADGE_DEFS.length} Burnfolio badges.`,
+    canonical: `https://burnfolio.ai/${name}/badges`,
+    signedIn: isSignedIn,
+  });
 }
 
 async function leaderboardRoute(request, env) {
@@ -2539,13 +2843,20 @@ function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { us
 
 function recentSyncsTicker(recent) {
   return `<div class="recent-ticker" data-recent-ticker${!recent || !recent.length ? " hidden" : ""}>
-    <p class="eyebrow">Recent syncs</p>
+    <p class="eyebrow">Recent activity</p>
     <ul>${recentSyncsItems(recent)}</ul>
   </div>`;
 }
 
+function recentActivityItem(r) {
+  if (r.type === "badge") {
+    return `<li><strong>${esc(r.ref)}</strong> earned <strong>${esc(r.badge_name)}</strong> &middot; <span data-since="${esc(r.at)}">recently</span></li>`;
+  }
+  return `<li><strong>${esc(r.tokens_display)}</strong> tokens synced &middot; <span data-since="${esc(r.at)}">recently</span></li>`;
+}
+
 function recentSyncsItems(recent) {
-  return (recent || []).map((r) => `<li><strong>${esc(r.tokens_display)}</strong> tokens synced <span data-since="${esc(r.updated_at)}">recently</span></li>`).join("");
+  return (recent || []).map(recentActivityItem).join("");
 }
 
 function landingSteps() {
@@ -2917,7 +3228,8 @@ function profileHtml(profile, isSignedIn = false) {
         ${statCard("Daily average", formatCompact(stats.average_active_day_tokens), "on active days")}
         ${profile.percentile ? statCard("Percentile", `Top ${profile.percentile.percentile}%`, "by total tokens", "Among all Burnfolio profiles by total tokens.") : ""}
       </section>
-      ${badgeChipRow(profile.badges)}
+      ${badgeRarityPills(name, profile.badgeRows)}
+      ${badgeRecentAchievements(name, profile.badgeRows)}
       ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned`, eras: true })}
       ${heatmapYears(profile.days).length > 1 ? heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" }) : ""}
       ${sourceBreakdownSection(profile.economics)}
@@ -3700,19 +4012,44 @@ function statCard(label, value, detail = "", tip = "") {
   return `<div><span>${esc(label)}${tipMarkup}</span><strong>${esc(value)}</strong>${detail ? `<em>${esc(detail)}</em>` : ""}</div>`;
 }
 
-function badgeChipRow(earnedKeys) {
-  if (!earnedKeys || !earnedKeys.length) return "";
-  const defs = earnedKeys.map(badgeDef).filter(Boolean);
-  const rank = { rare: 0, uncommon: 1, common: 2 };
-  defs.sort((a, b) => rank[a.tier] - rank[b.tier]);
-  const shown = defs.slice(0, 6);
-  const extra = defs.length - shown.length;
-  const chips = shown.map((def) => {
-    const tip = `${def.description} (${badgeTooltip(def)})`;
-    return `<span class="badge-chip badge-tier-${def.tier}" data-tip="${esc(tip)}" title="${esc(tip)}" tabindex="0"><i class="badge-dot" aria-hidden="true"></i>${esc(def.name)}</span>`;
-  }).join("");
-  const more = extra > 0 ? `<a class="badge-more" href="/badges">+${extra} more</a>` : "";
-  return `<div class="badge-chip-row">${chips}${more}</div>`;
+// StackOverflow-style rarity summary: one "medallion + count" pill per tier
+// that actually has earned badges, linking to the profile's badge detail page.
+function badgeRarityPills(ref, earnedRows) {
+  if (!earnedRows || !earnedRows.length) return "";
+  const counts = { rare: 0, uncommon: 0, common: 0 };
+  for (const row of earnedRows) {
+    const def = badgeDef(row.badge_key);
+    if (def) counts[def.tier] = (counts[def.tier] || 0) + 1;
+  }
+  const pills = BADGE_TIER_ORDER.filter((tier) => counts[tier] > 0).map((tier) =>
+    `<a class="badge-rarity-pill badge-tier-${tier}" href="/${esc(ref)}/badges" data-tip="${esc(BADGE_TIERS[tier])} badges" title="${esc(BADGE_TIERS[tier])} badges">${badgeMedallion()}<span>${counts[tier]}</span></a>`
+  ).join("");
+  return pills ? `<div class="badge-rarity-pills">${pills}</div>` : "";
+}
+
+// Compact single-line "Name · Tier · Mon D" rows — the shared achievement-row
+// shape used on both the dashboard Goals panel and public profiles.
+function badgeAchievementRow(row) {
+  const def = badgeDef(row.badge_key);
+  if (!def) return "";
+  const tip = `${def.description} (${badgeTooltip(def)})`;
+  const dateLabel = formatShortDate(String(row.earned_at || "").slice(0, 10));
+  return `<div class="badge-achievement-row badge-tier-${def.tier}" data-tip="${esc(tip)}" title="${esc(tip)}">
+    ${badgeMedallion()}
+    <span class="badge-achievement-name">${esc(def.name)}</span>
+    <span class="badge-achievement-tier">${esc(BADGE_TIERS[def.tier])}</span>
+    <span class="badge-achievement-date">${esc(dateLabel)}</span>
+  </div>`;
+}
+
+function badgeRecentAchievements(ref, earnedRows) {
+  if (!earnedRows || !earnedRows.length) return "";
+  const recent = earnedRows.slice(0, 3);
+  return `<div class="recent-achievements">
+    <h3>Recent achievements</h3>
+    ${recent.map((row) => badgeAchievementRow(row)).join("")}
+    <a class="badge-more" href="/${esc(ref)}/badges">All badges &rarr;</a>
+  </div>`;
 }
 
 function sourceBreakdownSection(economics) {
@@ -3739,22 +4076,51 @@ const HISTORY_TABLE_DAYS = 30;
 function badgeProgressLabel(def, bundle) {
   const fmt = formatCompact;
   switch (def.key) {
+    case "tokenizer": return `${fmt(bundle.lifetimeTokens)} / ${fmt(1_000_000)} tokens`;
+    case "context_builder": return `${fmt(bundle.lifetimeTokens)} / ${fmt(10_000_000)} tokens`;
     case "warm_cache": return `${fmt(bundle.lifetimeTokens)} / ${fmt(100_000_000)} tokens`;
     case "training_loop": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 7 day streak`;
     case "multi_agent": return `${bundle.distinctTools} / 3 tools`;
     case "model_collector": return `${bundle.distinctModels} / 5 models`;
     case "always_on": return `${bundle.activeDays} / 30 active days`;
+    case "wordsmith": return `${fmt(bundle.outputTokens)} / ${fmt(10_000_000)} output tokens`;
+    case "context_stuffer": return `${fmt(bundle.inputTokens)} / ${fmt(50_000_000)} input tokens`;
+    case "chain_of_thought": return `${fmt(bundle.reasoningTokens)} / ${fmt(1_000_000)} reasoning tokens`;
+    case "chatterbox": return `${formatInt(bundle.records)} / 1,000 records`;
+    case "fortnight": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 14 day streak`;
+    case "pair_programmer": return `${bundle.distinctTools} / 2 tools`;
+    case "weekend_warrior": return `${bundle.weekendActiveDays} / 10 weekend days`;
+    case "open_book": return "add a bio and a link";
+    case "team_player": return "join or accept an org invite";
+    case "router": return "connect OpenRouter";
     case "billion_token_brain": return `${fmt(bundle.lifetimeTokens)} / ${fmt(1_000_000_000)} tokens`;
     case "epoch": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 30 day streak`;
     case "overclocked": return `${fmt(bundle.bestDayTokens)} / ${fmt(100_000_000)} best day`;
     case "orchestrator": return `${bundle.distinctTools} / 5 tools`;
     case "ensemble": return `${bundle.distinctModels} / 10 models`;
     case "cache_whisperer": return `${fmt(bundle.cacheReadTokens)} cache-read so far`;
+    case "novelist": return `${fmt(bundle.outputTokens)} / ${fmt(100_000_000)} output tokens`;
+    case "context_maximalist": return `${fmt(bundle.inputTokens)} / ${fmt(500_000_000)} input tokens`;
+    case "cache_architect": return `${fmt(bundle.cacheWriteTokens)} / ${fmt(100_000_000)} cache-write tokens`;
+    case "deliberator": return `${fmt(bundle.reasoningTokens)} / ${fmt(100_000_000)} reasoning tokens`;
+    case "api_hammer": return `${formatInt(bundle.records)} / 10,000 records`;
+    case "half_life": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 50 day streak`;
+    case "habitual": return `${bundle.activeDays} / 100 active days`;
+    case "polyglot": return `${bundle.distinctModels} / 15 models`;
+    case "provider_hopper": return `${bundle.distinctProviders} / 3 providers`;
+    case "perfect_attendance": return "no full calendar month yet";
+    case "four_seasons": return `${bundle.distinctActiveMonths} / 12 months`;
     case "pretraining_run": return `${fmt(bundle.lifetimeTokens)} / ${fmt(10_000_000_000)} tokens`;
     case "foundation_model": return `${fmt(bundle.lifetimeTokens)} / ${fmt(100_000_000_000)} tokens`;
     case "convergence": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 100 day streak`;
     case "datacenter_cosplay": return `${fmt(bundle.bestDayTokens)} / ${fmt(1_000_000_000)} best day`;
     case "mixture_of_experts": return `${bundle.distinctModels} / 25 models`;
+    case "superintelligence": return `${fmt(bundle.lifetimeTokens)} / ${fmt(1_000_000_000_000)} tokens`;
+    case "printing_press": return `${fmt(bundle.outputTokens)} / ${fmt(1_000_000_000)} output tokens`;
+    case "librarian": return `${fmt(bundle.inputTokens)} / ${fmt(5_000_000_000)} input tokens`;
+    case "rate_limit_tourist": return `${formatInt(bundle.records)} / 100,000 records`;
+    case "year_of_burn": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 365 day streak`;
+    case "lifer": return `${bundle.activeDays} / 250 active days`;
     default: return "";
   }
 }
@@ -3772,8 +4138,10 @@ async function goalsPanel(env, account) {
   const days = await userDays(env, account.id);
   const total = days.reduce((sum, d) => sum + d.total_tokens, 0);
   const stats = profileStats(days, total);
-  const bundle = await badgeBundleFor(env, account, stats, total);
-  const earned = new Set(computeBadges(bundle));
+  const bundle = await badgeBundleFor(env, account, stats, total, days);
+  await awardBadges(env, account, bundle); // lazy catch-up — visiting your own dashboard counts too
+  const earnedRows = await fetchEarnedBadges(env, account.id);
+  const earned = new Set(earnedRows.map((r) => r.badge_key));
 
   const monthStart = `${todayUTCDate().toISOString().slice(0, 7)}-01`;
   const monthToDate = days.filter((d) => d.date_utc >= monthStart).reduce((sum, d) => sum + int(d.total_tokens), 0);
@@ -3784,11 +4152,11 @@ async function goalsPanel(env, account) {
   const met = hasGoal && pct >= 100;
 
   const nearest = BADGE_DEFS
-    .filter((def) => !def.secret && !earned.has(def.key))
+    .filter((def) => !def.secret && !def.meta && !earned.has(def.key))
     .map((def) => ({ def, fraction: Math.min(badgeProgress(def, bundle), 0.99) }))
     .sort((a, b) => b.fraction - a.fraction)
     .slice(0, 4);
-  const earnedCount = BADGE_DEFS.filter((def) => earned.has(def.key)).length;
+  const recent = earnedRows.slice(0, 3);
 
   return `<section class="panel goals-panel">
     <div class="section-head"><div><h2>Goals</h2><p class="muted">Your monthly burn goal and nearest badge progress. Private — never shown on your public profile.</p></div></div>
@@ -3804,11 +4172,15 @@ async function goalsPanel(env, account) {
         <p class="muted">${formatCompact(monthToDate)} / ${formatCompact(goal)} tokens this month (${pct}%)${met ? " — Goal met \u{1F525}" : ""}</p>
       </div>` : `<p class="muted">Set a monthly token goal to track progress here.</p>`}
     </div>
+    ${recent.length ? `<div class="recent-achievements">
+      <h3>Recent achievements</h3>
+      ${recent.map((row) => badgeAchievementRow(row)).join("")}
+    </div>` : ""}
     <div class="badge-progress-list">
       <h3>Nearest badges</h3>
       ${nearest.length ? nearest.map((n) => badgeProgressRow(n.def, n.fraction, bundle)).join("") : `<p class="muted">All badges earned. Nicely done.</p>`}
     </div>
-    <p class="goals-earned-line">${earnedCount} of ${BADGE_DEFS.length} badges earned &middot; <a href="/badges">View all &rarr;</a></p>
+    <p class="goals-earned-line">${earned.size} of ${BADGE_DEFS.length} badges earned &middot; <a href="/badges">View all &rarr;</a></p>
   </section>`;
 }
 
@@ -4863,12 +5235,20 @@ function globalScript() {
         list.textContent = "";
         rows.forEach((r) => {
           const li = document.createElement("li");
-          const strong = document.createElement("strong");
-          strong.textContent = r.tokens_display;
           const since = document.createElement("span");
-          since.dataset.since = r.updated_at;
+          since.dataset.since = r.at;
           since.textContent = "recently";
-          li.append(strong, document.createTextNode(" tokens synced "), since);
+          if (r.type === "badge") {
+            const who = document.createElement("strong");
+            who.textContent = r.ref;
+            const badgeName = document.createElement("strong");
+            badgeName.textContent = r.badge_name;
+            li.append(who, document.createTextNode(" earned "), badgeName, document.createTextNode(" · "), since);
+          } else {
+            const strong = document.createElement("strong");
+            strong.textContent = r.tokens_display;
+            li.append(strong, document.createTextNode(" tokens synced · "), since);
+          }
           list.appendChild(li);
         });
         refreshTimes();
@@ -4992,11 +5372,19 @@ function globalScript() {
     function showTip(event) {
       const target = event.target.closest("[data-tip]");
       if (!target) return;
+      const margin = 8;
       tip.textContent = target.dataset.tip;
       tip.hidden = false;
       const rect = target.getBoundingClientRect();
-      tip.style.left = rect.left + rect.width / 2 + "px";
-      tip.style.top = rect.top - 8 + "px";
+      const tipRect = tip.getBoundingClientRect();
+      // Flip below the target when there isn't room above; otherwise sit above it.
+      const fitsAbove = rect.top - tipRect.height - margin >= 0;
+      const top = fitsAbove ? rect.top - tipRect.height - margin : Math.min(rect.bottom + margin, window.innerHeight - tipRect.height - margin);
+      // Center horizontally on the target, then clamp within the viewport.
+      let left = rect.left + rect.width / 2 - tipRect.width / 2;
+      left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+      tip.style.left = left + "px";
+      tip.style.top = Math.max(margin, top) + "px";
     }
     function hideTip() {
       tip.hidden = true;

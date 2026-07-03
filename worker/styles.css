@@ -809,35 +809,25 @@ form {
   cursor: help;
   vertical-align: middle;
 }
-.badge-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin: -14px 0 24px;
-}
-.badge-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 8px;
-  border: 1px solid var(--burnfolio-line);
-  border-radius: var(--burnfolio-r-pill);
-  background: var(--burnfolio-linen);
-  color: var(--burnfolio-ash);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: help;
-}
-.badge-dot {
-  width: 6px;
-  height: 6px;
+/* Shared medallion: the single visual atom that carries rarity at a glance
+   (like SO's gold/silver/bronze), reused by chips, cards, pills, and rows. */
+.badge-medallion {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--burnfolio-ash);
+  box-shadow: 0 0 0 2px var(--burnfolio-linen), 0 0 0 3px var(--burnfolio-line);
+  flex: 0 0 auto;
 }
-.badge-tier-rare .badge-dot { background: var(--burnfolio-glow); }
-.badge-tier-uncommon .badge-dot { background: var(--burnfolio-info); }
-.badge-tier-common .badge-dot { background: var(--burnfolio-ash); }
+.badge-tier-rare .badge-medallion { background: var(--burnfolio-flame-deep); }
+.badge-tier-uncommon .badge-medallion { background: var(--burnfolio-ember); }
+.badge-tier-common .badge-medallion { background: var(--burnfolio-ash-dark); }
+.badge-check {
+  color: var(--burnfolio-flame-deep);
+  font-style: normal;
+  font-weight: 900;
+}
 .badge-more {
   font-size: 12px;
   font-weight: 700;
@@ -845,6 +835,63 @@ form {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+
+/* Rarity summary pills on the profile header (StackOverflow-style). */
+.badge-rarity-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -14px 0 20px;
+}
+.badge-rarity-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px 5px 9px;
+  border: 1px solid var(--burnfolio-line);
+  border-radius: var(--burnfolio-r-pill);
+  background: var(--burnfolio-linen);
+  color: var(--burnfolio-ink);
+  font-size: 13px;
+  font-weight: 800;
+  font-family: "Space Mono", ui-monospace, monospace;
+}
+.badge-rarity-pill:hover {
+  background: var(--burnfolio-wash);
+}
+
+/* Recent achievements: compact "Name · Tier · Mon D" rows, reused on both
+   public profiles and the dashboard Goals panel. */
+.recent-achievements {
+  margin: 0 0 20px;
+}
+.recent-achievements h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--burnfolio-ink);
+}
+.badge-achievement-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  font-size: 13px;
+  cursor: help;
+}
+.badge-achievement-name {
+  font-weight: 700;
+  color: var(--burnfolio-ink);
+}
+.badge-achievement-tier {
+  color: var(--burnfolio-ash);
+}
+.badge-achievement-date {
+  margin-left: auto;
+  color: var(--burnfolio-ash);
+  font-family: "Space Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
 .badge-tier-group {
   margin-top: 32px;
 }
@@ -896,6 +943,40 @@ form {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: .04em;
+}
+
+/* Chip: used on the /:ref/badges detail page (grouped by tier, earned only). */
+.badge-detail-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.badge-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 8px 10px;
+  border: 1px solid var(--burnfolio-line);
+  border-radius: var(--burnfolio-r-pill);
+  background: var(--burnfolio-linen);
+  color: var(--burnfolio-ink);
+  font-size: 13px;
+  cursor: help;
+}
+.badge-chip.earned {
+  border-color: var(--burnfolio-flame-deep);
+  background: var(--burnfolio-wash);
+}
+.badge-chip-name {
+  font-weight: 700;
+}
+.badge-chip-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--burnfolio-ash);
+  font-size: 11px;
+  font-family: "Space Mono", ui-monospace, monospace;
 }
 
 .burning-panel .burning-grid {
@@ -1314,7 +1395,7 @@ form {
 .burn-tooltip {
   position: fixed;
   z-index: 50;
-  max-width: 280px;
+  max-width: min(280px, calc(100vw - 24px));
   padding: 8px 10px;
   border: 1px solid var(--burnfolio-line);
   border-radius: 12px;
@@ -1323,8 +1404,10 @@ form {
   font-size: 12px;
   box-shadow: 0 16px 50px rgba(0, 0, 0, .45);
   pointer-events: none;
-  transform: translate(-50%, -120%);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
+  /* top/left are set as exact pixel coordinates in JS (clamped to the
+     viewport), not centered via transform — see showTip(). */
 }
 
 html.share-open,
