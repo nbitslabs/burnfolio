@@ -132,28 +132,11 @@ async function route(request, env) {
   return html(notFoundPage(await signedIn(request, env)), 404);
 }
 
+// Anonymous account creation is retired — signup is email magic-link only.
+// Existing anonymous accounts are unaffected; they still sign in via account
+// number (accountLogin) and can attach an email at any time.
 async function signup(request, env) {
-  const limited = await rateLimitChecks(request, env, [
-    [await rateKey("signup:ip", clientIP(request)), 5, 3600],
-  ]);
-  if (limited) return limited;
-
-  const body = await readBody(request);
-  if (cleanEmail(body.email)) return json({ error: "email_signup_requires_magic_link" }, 400);
-  const rawHandle = body.username || body.handle;
-  const handle = cleanHandle(rawHandle);
-  if (String(rawHandle || "").trim() && !handle) return json({ error: "invalid_handle" }, 400);
-  const user = await createUser(env, { email: "", handle });
-  if (user.error) return json(user, user.status || 400);
-  const machine = await createMachine(env, {
-    userID: user.id,
-    name: body.machine_name || "First machine",
-    profileRef: accountRef(user.account),
-  });
-  const sessionToken = await createSession(env, user.id);
-  return json({ account: user.account, account_key: user.accountKey, machine }, 201, {
-    "Set-Cookie": cookie(sessionToken),
-  });
+  return json({ error: "anonymous_signup_disabled" }, 410);
 }
 
 async function accountLogin(request, env) {
@@ -1653,10 +1636,6 @@ function badgeDef(key) {
   return BADGE_DEFS.find((b) => b.key === key) || null;
 }
 
-function badgeTooltip(def) {
-  return `${BADGE_TIERS[def.tier]} · ${def.name} badge`;
-}
-
 // Non-meta badges whose check() is satisfied right now. Meta badges
 // (badge_collector, completionist) are evaluated separately by awardBadges,
 // against the account's earned-row count, not this bundle.
@@ -2028,7 +2007,7 @@ function badgeCard(def, { count = 0, earnedAt = null, showPill = true, personalL
   const name = isSecret ? def.secretName : def.name;
   const description = isSecret ? def.secretDescription : def.description;
   const earned = Boolean(earnedAt);
-  const footerLeft = count === 0 ? "No one has earned this yet" : `Earned by ${count} ${count === 1 ? "builder" : "builders"}`;
+  const footerLeft = count === 0 ? "Not yet awarded" : `${formatCompact(count)} awarded`;
   const footerRight = earned ? `${personalLabel} ${formatDate(String(earnedAt).slice(0, 10))}` : "";
   const pill = earned && showPill ? `<span class="badge-pill" title="You earned this" aria-label="You earned this"><i class="badge-check" aria-hidden="true">&#10003;</i> Earned</span>` : "";
   return `<div class="badge-card badge-tier-${def.tier}${earned ? " earned" : ""}">
@@ -2915,22 +2894,10 @@ function authPage(mode = "signup") {
       </section>
       <aside class="auth-card auth-side">
         <div>
-          <span>Primary flow</span>
-          <strong>Email profile</strong>
-          <p>Best for recovery, username claims, teams, and setting up machines across devices.</p>
+          <span>How it works</span>
+          <strong>Email magic link</strong>
+          <p>No password to remember. Recovers your profile, lets you claim a username, and works across every device you sync from.</p>
         </div>
-        <details>
-          <summary>Continue without email</summary>
-          <p class="muted">Anonymous profiles use an account number and private account key. Save the key immediately; it is your only recovery path until you attach an email.</p>
-          <form class="auth-form" data-signup>
-            <label for="anon-machine">First machine name</label>
-            <div class="form-row">
-              <input id="anon-machine" name="machine_name" placeholder="macbook-pro" autocomplete="off">
-              <button class="secondary">Create anonymous profile</button>
-            </div>
-          </form>
-          <div class="result" data-result hidden></div>
-        </details>
         <details>
           <summary>Sign in with account number</summary>
           <form class="auth-form" data-account-login>
@@ -4184,7 +4151,7 @@ function badgeRarityPills(ref, earnedRows) {
 function badgeAchievementRow(row) {
   const def = badgeDef(row.badge_key);
   if (!def) return "";
-  const tip = `${def.description} (${badgeTooltip(def)})`;
+  const tip = def.description;
   const dateLabel = formatShortDate(String(row.earned_at || "").slice(0, 10));
   return `<div class="badge-achievement-row badge-tier-${def.tier}" data-tip="${esc(tip)}" title="${esc(tip)}">
     ${badgeMedallion()}
@@ -4285,7 +4252,7 @@ function badgeProgressLabel(def, bundle) {
 
 function badgeProgressRow(def, fraction, bundle) {
   const pct = Math.round(Math.min(1, Math.max(0, fraction)) * 100);
-  const tip = `${def.description} (${badgeTooltip(def)})`;
+  const tip = def.description;
   return `<div class="badge-progress-row" data-tip="${esc(tip)}" title="${esc(tip)}">
     <div class="badge-progress-row-head"><span>${esc(def.name)}</span><span class="muted">${esc(badgeProgressLabel(def, bundle))}</span></div>
     <div class="goal-progress-track"><div class="goal-progress-fill" style="width:${pct}%"></div></div>
@@ -4628,50 +4595,6 @@ function assetData() {
 
 function signupScript() {
   return `
-    function secretRow(label, value) {
-      const row = document.createElement("div");
-      row.className = "secret";
-      const wrap = document.createElement("div");
-      const name = document.createElement("span");
-      name.textContent = label;
-      const code = document.createElement("code");
-      code.textContent = value;
-      wrap.append(name, code);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "secondary copy";
-      button.textContent = "Copy";
-      button.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(value);
-          button.textContent = "Copied";
-        } catch {
-          button.textContent = "Select";
-        }
-        setTimeout(() => button.textContent = "Copy", 1200);
-      });
-      row.append(wrap, button);
-      return row;
-    }
-    function setupResult(target, items, footer) {
-      target.hidden = false;
-      target.innerHTML = "";
-      const box = document.createElement("section");
-      box.className = "setup";
-      const heading = document.createElement("h2");
-      heading.textContent = "Account created";
-      const grid = document.createElement("div");
-      grid.className = "secret-grid";
-      for (const item of items) grid.appendChild(secretRow(item.label, item.value));
-      const note = document.createElement("p");
-      note.textContent = footer;
-      const app = document.createElement("a");
-      app.className = "button secondary";
-      app.href = "/app";
-      app.textContent = "Open dashboard";
-      box.append(heading, grid, note, app);
-      target.appendChild(box);
-    }
     function messageFor(data) {
       const messages = {
         invalid_email: "Enter a valid email address.",
@@ -4719,36 +4642,6 @@ function signupScript() {
         button.textContent = "Resend in " + remaining + "s";
       }, 1000);
     }
-    document.querySelector("[data-signup]").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const form = event.currentTarget;
-      const button = submitButton(form);
-      const result = document.querySelector("[data-result]");
-      const body = Object.fromEntries(new FormData(form).entries());
-      setBusy(button, "Creating...");
-      result.hidden = false;
-      result.textContent = "Creating your profile...";
-      try {
-        const res = await fetch("/api/signup", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
-        const data = await res.json();
-        if (!res.ok) {
-          result.textContent = messageFor(data);
-          restoreButton(button);
-          return;
-        }
-        const profile = data.account.handle || data.account.account_number;
-        const command = "curl -fsSL https://raw.githubusercontent.com/nbitslabs/burnfolio/main/install.sh | bash -s -- --profile " + profile + " --machine " + data.machine.token;
-        setupResult(result, [
-          { label: "Account number", value: data.account.account_number },
-          { label: "Account key", value: data.account_key },
-          { label: "Machine token", value: data.machine.token },
-          { label: "Install + sync command", value: command }
-        ], "Save the account key now. It is the private credential for anonymous sign-in.");
-      } catch {
-        result.textContent = "Something went wrong. Check the inputs and try again.";
-        restoreButton(button);
-      }
-    });
     document.querySelector("[data-login]").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
