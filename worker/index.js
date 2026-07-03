@@ -75,6 +75,8 @@ async function route(request, env) {
   if (path === "/favicon.ico") return assetResponse("pyro-512.png");
   if (path === "/apple-touch-icon.png") return assetResponse("pyro-512.png");
   if (path.match(/^\/assets\/[^/]+$/)) return assetResponse(path.split("/")[2]);
+  if (path === "/sitemap.xml") return sitemapRoute(env);
+  if (path === "/robots.txt") return robotsRoute();
   if (path === "/og/landing.png") return assetResponse("og-landing.png");
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
@@ -2188,6 +2190,37 @@ async function ogProfilePNGPage(env, ref) {
   return response;
 }
 
+const SITEMAP_STATIC_PATHS = ["/", "/leaderboard", "/badges", "/how-we-count", "/privacy", "/signup"];
+const SITEMAP_LIMIT = 1000;
+
+function sitemapUrl(loc, changefreq = "") {
+  const freq = changefreq ? `<changefreq>${changefreq}</changefreq>` : "";
+  return `<url><loc>${esc(loc)}</loc>${freq}</url>`;
+}
+
+async function sitemapRoute(env) {
+  const cacheKey = new Request("https://cache.internal/sitemap.xml");
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+
+  const urls = SITEMAP_STATIC_PATHS.map((path) => sitemapUrl(`https://burnfolio.ai${path}`));
+  const ranked = await cachedRankedAccountRows(env, "all");
+  for (const row of ranked.slice(0, SITEMAP_LIMIT)) {
+    const ref = row.handle || row.account_number;
+    urls.push(sitemapUrl(`https://burnfolio.ai/${ref}`, "daily"));
+    urls.push(sitemapUrl(`https://burnfolio.ai/${ref}/badges`, "daily"));
+  }
+  const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>\n`;
+  const response = xmlResponse(body);
+  await cache.put(cacheKey, response.clone());
+  return response;
+}
+
+function robotsRoute() {
+  return textResponse("User-agent: *\nAllow: /\n\nSitemap: https://burnfolio.ai/sitemap.xml\n");
+}
+
 async function embedPage(request, env, ref) {
   const profile = await buildProfile(env, ref);
   const params = new URL(request.url).searchParams;
@@ -3953,7 +3986,7 @@ function siteFooter() {
       <a href="/how-we-count">How we count</a>
       <a href="/privacy">Privacy</a>
     </div>
-    <p>&copy; ${year} Burnfolio</p>
+    <p>&copy; ${year} Burnfolio &middot; Built by <a href="https://nbitslabs.com" target="_blank" rel="noopener">nBits Labs</a></p>
   </footer>`;
 }
 
@@ -5574,6 +5607,28 @@ function svgResponse(body, status = 200) {
     headers: {
       "Content-Type": "image/svg+xml; charset=utf-8",
       "Cache-Control": "public, max-age=300",
+    },
+  });
+}
+
+function xmlResponse(body, status = 200, maxAge = 3600) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "application/xml; charset=utf-8",
+      "Cache-Control": `public, max-age=${maxAge}`,
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+function textResponse(body, status = 200, maxAge = 3600) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": `public, max-age=${maxAge}`,
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
