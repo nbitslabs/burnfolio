@@ -1558,44 +1558,44 @@ const BADGE_TIER_ORDER = ["rare", "uncommon", "common"];
 
 const BADGE_DEFS = [
   // --- Base Model (common) ---
-  { key: "hello_world", name: "Hello, World", tier: "common", description: "Every run starts with a single token.", check: (s) => s.lifetimeTokens > 0 },
-  { key: "tokenizer", name: "Tokenizer", tier: "common", description: "Your first million. The vocabulary is warm.", check: (s) => s.lifetimeTokens >= 1_000_000 },
-  { key: "context_builder", name: "Context Builder", tier: "common", description: "Ten million tokens in. It's becoming a habit.", check: (s) => s.lifetimeTokens >= 10_000_000 },
-  { key: "warm_cache", name: "Warm Cache", tier: "common", description: "One hundred million tokens. The KV cache remembers you now.", check: (s) => s.lifetimeTokens >= 100_000_000 },
-  { key: "training_loop", name: "Training Loop", tier: "common", description: "Seven consecutive days. The loss curve is trending down.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 7 },
-  { key: "multi_agent", name: "Multi-Agent", tier: "common", description: "Three agents, one human in the loop. Allegedly.", check: (s) => s.distinctTools >= 3 },
-  { key: "model_collector", name: "Model Collector", tier: "common", description: "Gotta prompt 'em all.", check: (s) => s.distinctModels >= 5 },
-  { key: "always_on", name: "Always On", tier: "common", description: "Uptime rivaling the API you call.", check: (s) => s.activeDays >= 30 },
-  { key: "wordsmith", name: "Wordsmith", tier: "common", description: "Ten million tokens generated. Some of them compiled.", check: (s) => s.outputTokens >= 10_000_000 },
-  { key: "context_stuffer", name: "Context Stuffer", tier: "common", description: "Everything is relevant context if you believe hard enough.", check: (s) => s.inputTokens >= 50_000_000 },
-  { key: "chain_of_thought", name: "Chain of Thought", tier: "common", description: "Let's think step by step.", check: (s) => s.reasoningTokens >= 1_000_000 },
-  { key: "chatterbox", name: "Chatterbox", tier: "common", description: "A thousand requests. It remembers you fondly. Probably.", check: (s) => s.records >= 1_000 },
-  { key: "fortnight", name: "Fortnight", tier: "common", description: "Two weeks in the loop. No checkpoint needed.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 14 },
-  { key: "pair_programmer", name: "Pair Programmer", tier: "common", description: "Two agents, four hands, one merge conflict.", check: (s) => s.distinctTools >= 2 },
-  { key: "weekend_warrior", name: "Weekend Warrior", tier: "common", description: "Shipping doesn't check the calendar.", check: (s) => s.weekendActiveDays >= 10 },
-  { key: "open_book", name: "Open Book", tier: "common", description: "Alignment through transparency.", check: (s) => s.hasBioAndLink },
-  { key: "team_player", name: "Team Player", tier: "common", description: "Multi-agent systems work better with trust.", check: (s) => s.hasActiveOrgMembership },
-  { key: "router", name: "The Router", tier: "common", description: "All roads lead through you.", check: (s) => s.hasOpenRouterUsage },
+  { key: "hello_world", name: "Hello, World", tier: "common", description: "Every run starts with a single token.", requirement: "Burn any tokens at all.", check: (s) => s.lifetimeTokens > 0 },
+  { key: "tokenizer", name: "Tokenizer", tier: "common", description: "Your first million. The vocabulary is warm.", requirement: "Burn 1m lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 1_000_000 },
+  { key: "context_builder", name: "Context Builder", tier: "common", description: "Ten million tokens in. It's becoming a habit.", requirement: "Burn 10m lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 10_000_000 },
+  { key: "warm_cache", name: "Warm Cache", tier: "common", description: "One hundred million tokens. The KV cache remembers you now.", requirement: "Burn 100m lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 100_000_000 },
+  { key: "training_loop", name: "Training Loop", tier: "common", description: "Seven consecutive days. The loss curve is trending down.", requirement: "Reach a 7-day sync streak.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 7 },
+  { key: "multi_agent", name: "Multi-Agent", tier: "common", description: "Three agents, one human in the loop. Allegedly.", requirement: "Use 3 or more distinct tools.", check: (s) => s.distinctTools >= 3 },
+  { key: "model_collector", name: "Model Collector", tier: "common", description: "Gotta prompt 'em all.", requirement: "Use 5 or more distinct models.", check: (s) => s.distinctModels >= 5 },
+  { key: "always_on", name: "Always On", tier: "common", description: "Uptime rivaling the API you call.", requirement: "Be active on 30 days.", check: (s) => s.activeDays >= 30 },
+  { key: "wordsmith", name: "Wordsmith", tier: "common", description: "Ten million tokens generated. Some of them compiled.", requirement: "Generate 10m output tokens.", check: (s) => s.outputTokens >= 10_000_000 },
+  { key: "context_stuffer", name: "Context Stuffer", tier: "common", description: "Everything is relevant context if you believe hard enough.", requirement: "Burn 50m input tokens.", check: (s) => s.inputTokens >= 50_000_000 },
+  { key: "chain_of_thought", name: "Chain of Thought", tier: "common", description: "Let's think step by step.", requirement: "Burn 1m reasoning tokens.", check: (s) => s.reasoningTokens >= 1_000_000 },
+  { key: "chatterbox", name: "Chatterbox", tier: "common", description: "A thousand requests. It remembers you fondly. Probably.", requirement: "Sync 1,000 requests.", check: (s) => s.records >= 1_000 },
+  { key: "fortnight", name: "Fortnight", tier: "common", description: "Two weeks in the loop. No checkpoint needed.", requirement: "Reach a 14-day sync streak.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 14 },
+  { key: "pair_programmer", name: "Pair Programmer", tier: "common", description: "Two agents, four hands, one merge conflict.", requirement: "Use 2 or more distinct tools.", check: (s) => s.distinctTools >= 2 },
+  { key: "weekend_warrior", name: "Weekend Warrior", tier: "common", description: "Shipping doesn't check the calendar.", requirement: "Be active on 10 Saturdays or Sundays (UTC).", check: (s) => s.weekendActiveDays >= 10 },
+  { key: "open_book", name: "Open Book", tier: "common", description: "Alignment through transparency.", requirement: "Set a bio and at least one profile link.", check: (s) => s.hasBioAndLink },
+  { key: "team_player", name: "Team Player", tier: "common", description: "Multi-agent systems work better with trust.", requirement: "Accept an organization membership.", check: (s) => s.hasActiveOrgMembership },
+  { key: "router", name: "The Router", tier: "common", description: "All roads lead through you.", requirement: "Sync any OpenRouter usage.", check: (s) => s.hasOpenRouterUsage },
 
   // --- Fine-Tune (uncommon) ---
-  { key: "billion_token_brain", name: "Billion-Token Brain", tier: "uncommon", description: "Enough tokens to pretrain a very small, very confused model.", check: (s) => s.lifetimeTokens >= 1_000_000_000 },
-  { key: "epoch", name: "Epoch", tier: "uncommon", description: "One full pass over the month. No early stopping.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 30 },
-  { key: "overclocked", name: "Overclocked", tier: "uncommon", description: "Your fans are audible from space.", check: (s) => s.bestDayTokens >= 100_000_000 },
-  { key: "orchestrator", name: "Orchestrator", tier: "uncommon", description: "You don't write code anymore. You conduct it.", check: (s) => s.distinctTools >= 5 },
-  { key: "ensemble", name: "Ensemble", tier: "uncommon", description: "Ten models polled. Consensus pending.", check: (s) => s.distinctModels >= 10 },
-  { key: "cache_whisperer", name: "Cache Whisperer", tier: "uncommon", description: "Half your context came straight from cache. The bill thanks you.", check: (s) => s.cacheReadTokens >= 10_000_000 && s.cacheReadTokens >= 0.5 * (s.inputTokens + s.cacheReadTokens) },
-  { key: "novelist", name: "Novelist", tier: "uncommon", description: "A hundred million tokens out. War and Peace, 120 times, in one sitting.", check: (s) => s.outputTokens >= 100_000_000 },
-  { key: "context_maximalist", name: "Context Maximalist", tier: "uncommon", description: "Why summarize when you can paste?", check: (s) => s.inputTokens >= 500_000_000 },
-  { key: "cache_architect", name: "Cache Architect", tier: "uncommon", description: "You build the cache other people read from.", check: (s) => s.cacheWriteTokens >= 100_000_000 },
-  { key: "deliberator", name: "The Deliberator", tier: "uncommon", description: "A hundred million tokens of thinking. The answer was 4.", check: (s) => s.reasoningTokens >= 100_000_000 },
-  { key: "api_hammer", name: "API Hammer", tier: "uncommon", description: "When all you have is an API key, everything looks like a request.", check: (s) => s.records >= 10_000 },
-  { key: "half_life", name: "Half-Life", tier: "uncommon", description: "Fifty consecutive days. Still no crowbar.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 50 },
-  { key: "habitual", name: "Habitual", tier: "uncommon", description: "A hundred days of burn. This is your workflow now.", check: (s) => s.activeDays >= 100 },
-  { key: "polyglot", name: "Polyglot", tier: "uncommon", description: "Fifteen models. You speak fluent everything.", check: (s) => s.distinctModels >= 15 },
-  { key: "provider_hopper", name: "Provider Hopper", tier: "uncommon", description: "Vendor lock-in is a state of mind.", check: (s) => s.distinctProviders >= 3 },
-  { key: "perfect_attendance", name: "Perfect Attendance", tier: "uncommon", description: "One month, zero gaps. The cron job is jealous.", check: (s) => s.hasPerfectMonth },
-  { key: "four_seasons", name: "Four Seasons", tier: "uncommon", description: "A full trip around the sun, one burn at a time.", check: (s) => s.distinctActiveMonths >= 12 },
-  { key: "badge_collector", name: "Badge Collector", tier: "uncommon", description: "Achievement unlocked: achievements.", meta: true, metaThreshold: 10 },
+  { key: "billion_token_brain", name: "Billion-Token Brain", tier: "uncommon", description: "Enough tokens to pretrain a very small, very confused model.", requirement: "Burn 1b lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 1_000_000_000 },
+  { key: "epoch", name: "Epoch", tier: "uncommon", description: "One full pass over the month. No early stopping.", requirement: "Reach a 30-day sync streak.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 30 },
+  { key: "overclocked", name: "Overclocked", tier: "uncommon", description: "Your fans are audible from space.", requirement: "Burn 100m tokens in a single UTC day.", check: (s) => s.bestDayTokens >= 100_000_000 },
+  { key: "orchestrator", name: "Orchestrator", tier: "uncommon", description: "You don't write code anymore. You conduct it.", requirement: "Use 5 or more distinct tools.", check: (s) => s.distinctTools >= 5 },
+  { key: "ensemble", name: "Ensemble", tier: "uncommon", description: "Ten models polled. Consensus pending.", requirement: "Use 10 or more distinct models.", check: (s) => s.distinctModels >= 10 },
+  { key: "cache_whisperer", name: "Cache Whisperer", tier: "uncommon", description: "Half your context came straight from cache. The bill thanks you.", requirement: "Cache reads make up at least half your input (minimum 10m cache-read tokens).", check: (s) => s.cacheReadTokens >= 10_000_000 && s.cacheReadTokens >= 0.5 * (s.inputTokens + s.cacheReadTokens) },
+  { key: "novelist", name: "Novelist", tier: "uncommon", description: "A hundred million tokens out. War and Peace, 120 times, in one sitting.", requirement: "Generate 100m output tokens.", check: (s) => s.outputTokens >= 100_000_000 },
+  { key: "context_maximalist", name: "Context Maximalist", tier: "uncommon", description: "Why summarize when you can paste?", requirement: "Burn 500m input tokens.", check: (s) => s.inputTokens >= 500_000_000 },
+  { key: "cache_architect", name: "Cache Architect", tier: "uncommon", description: "You build the cache other people read from.", requirement: "Burn 100m cache-write tokens.", check: (s) => s.cacheWriteTokens >= 100_000_000 },
+  { key: "deliberator", name: "The Deliberator", tier: "uncommon", description: "A hundred million tokens of thinking. The answer was 4.", requirement: "Burn 100m reasoning tokens.", check: (s) => s.reasoningTokens >= 100_000_000 },
+  { key: "api_hammer", name: "API Hammer", tier: "uncommon", description: "When all you have is an API key, everything looks like a request.", requirement: "Sync 10,000 requests.", check: (s) => s.records >= 10_000 },
+  { key: "half_life", name: "Half-Life", tier: "uncommon", description: "Fifty consecutive days. Still no crowbar.", requirement: "Reach a 50-day sync streak.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 50 },
+  { key: "habitual", name: "Habitual", tier: "uncommon", description: "A hundred days of burn. This is your workflow now.", requirement: "Be active on 100 days.", check: (s) => s.activeDays >= 100 },
+  { key: "polyglot", name: "Polyglot", tier: "uncommon", description: "Fifteen models. You speak fluent everything.", requirement: "Use 15 or more distinct models.", check: (s) => s.distinctModels >= 15 },
+  { key: "provider_hopper", name: "Provider Hopper", tier: "uncommon", description: "Vendor lock-in is a state of mind.", requirement: "Use models from 3 or more providers.", check: (s) => s.distinctProviders >= 3 },
+  { key: "perfect_attendance", name: "Perfect Attendance", tier: "uncommon", description: "One month, zero gaps. The cron job is jealous.", requirement: "Be active every day of a calendar month.", check: (s) => s.hasPerfectMonth },
+  { key: "four_seasons", name: "Four Seasons", tier: "uncommon", description: "A full trip around the sun, one burn at a time.", requirement: "Be active in 12 distinct calendar months.", check: (s) => s.distinctActiveMonths >= 12 },
+  { key: "badge_collector", name: "Badge Collector", tier: "uncommon", description: "Achievement unlocked: achievements.", requirement: "Earn 10 badges.", meta: true, metaThreshold: 10 },
   {
     key: "leet",
     name: "1337",
@@ -1604,15 +1604,16 @@ const BADGE_DEFS = [
     description: "Nice. (You know what you did.)",
     secretName: "???",
     secretDescription: "Some numbers speak for themselves.",
+    requirement: "If you know, you know.",
     check: (s) => String(s.lifetimeTokens).includes("1337") || String(s.bestDayTokens).includes("1337"),
   },
 
   // --- Frontier (rare) ---
-  { key: "pretraining_run", name: "Pretraining Run", tier: "rare", description: "That's not usage. That's a dataset.", check: (s) => s.lifetimeTokens >= 10_000_000_000 },
-  { key: "foundation_model", name: "Foundation Model", tier: "rare", description: "Please disclose your training data.", check: (s) => s.lifetimeTokens >= 100_000_000_000 },
-  { key: "convergence", name: "Convergence", tier: "rare", description: "One hundred days in the loop. Gradient fully descended.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 100 },
-  { key: "datacenter_cosplay", name: "Datacenter Cosplay", tier: "rare", description: "Somewhere, a cluster spun up just for you.", check: (s) => s.bestDayTokens >= 1_000_000_000 },
-  { key: "mixture_of_experts", name: "Mixture of Experts", tier: "rare", description: "You are the gating network.", check: (s) => s.distinctModels >= 25 },
+  { key: "pretraining_run", name: "Pretraining Run", tier: "rare", description: "That's not usage. That's a dataset.", requirement: "Burn 10b lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 10_000_000_000 },
+  { key: "foundation_model", name: "Foundation Model", tier: "rare", description: "Please disclose your training data.", requirement: "Burn 100b lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 100_000_000_000 },
+  { key: "convergence", name: "Convergence", tier: "rare", description: "One hundred days in the loop. Gradient fully descended.", requirement: "Reach a 100-day sync streak.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 100 },
+  { key: "datacenter_cosplay", name: "Datacenter Cosplay", tier: "rare", description: "Somewhere, a cluster spun up just for you.", requirement: "Burn 1b tokens in a single UTC day.", check: (s) => s.bestDayTokens >= 1_000_000_000 },
+  { key: "mixture_of_experts", name: "Mixture of Experts", tier: "rare", description: "You are the gating network.", requirement: "Use 25 or more distinct models.", check: (s) => s.distinctModels >= 25 },
   {
     key: "deep_thought",
     name: "Deep Thought",
@@ -1621,15 +1622,16 @@ const BADGE_DEFS = [
     description: "42. The answer to burn, the universe, and everything.",
     secretName: "???",
     secretDescription: "Some questions answer themselves.",
+    requirement: "The answer is the requirement.",
     check: (s) => s.activeDays === 42 || s.currentStreak === 42 || s.longestStreak === 42,
   },
-  { key: "superintelligence", name: "Superintelligence", tier: "rare", description: "One trillion tokens. We are legally required to mention safety.", check: (s) => s.lifetimeTokens >= 1_000_000_000_000 },
-  { key: "printing_press", name: "Printing Press", tier: "rare", description: "A billion tokens generated. Gutenberg walked so you could prompt.", check: (s) => s.outputTokens >= 1_000_000_000 },
-  { key: "librarian", name: "The Librarian", tier: "rare", description: "You didn't read the docs. You fed them.", check: (s) => s.inputTokens >= 5_000_000_000 },
-  { key: "rate_limit_tourist", name: "Rate Limit Tourist", tier: "rare", description: "On a first-name basis with HTTP 429.", check: (s) => s.records >= 100_000 },
-  { key: "year_of_burn", name: "Year of Burn", tier: "rare", description: "A full year, every single day. Touch grass. (Badge includes grass.)", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 365 },
-  { key: "lifer", name: "Lifer", tier: "rare", description: "Two hundred and fifty days. The context window of a lifetime.", check: (s) => s.activeDays >= 250 },
-  { key: "completionist", name: "Completionist", tier: "rare", description: "You optimized the reward function.", meta: true, metaThreshold: 40 },
+  { key: "superintelligence", name: "Superintelligence", tier: "rare", description: "One trillion tokens. We are legally required to mention safety.", requirement: "Burn 1t lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 1_000_000_000_000 },
+  { key: "printing_press", name: "Printing Press", tier: "rare", description: "A billion tokens generated. Gutenberg walked so you could prompt.", requirement: "Generate 1b output tokens.", check: (s) => s.outputTokens >= 1_000_000_000 },
+  { key: "librarian", name: "The Librarian", tier: "rare", description: "You didn't read the docs. You fed them.", requirement: "Burn 5b input tokens.", check: (s) => s.inputTokens >= 5_000_000_000 },
+  { key: "rate_limit_tourist", name: "Rate Limit Tourist", tier: "rare", description: "On a first-name basis with HTTP 429.", requirement: "Sync 100,000 requests.", check: (s) => s.records >= 100_000 },
+  { key: "year_of_burn", name: "Year of Burn", tier: "rare", description: "A full year, every single day. Touch grass. (Badge includes grass.)", requirement: "Reach a 365-day sync streak.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 365 },
+  { key: "lifer", name: "Lifer", tier: "rare", description: "Two hundred and fifty days. The context window of a lifetime.", requirement: "Be active on 250 days.", check: (s) => s.activeDays >= 250 },
+  { key: "completionist", name: "Completionist", tier: "rare", description: "You optimized the reward function.", requirement: "Earn 40 badges.", meta: true, metaThreshold: 40 },
 ];
 
 function badgeDef(key) {
@@ -2010,8 +2012,9 @@ function badgeCard(def, { count = 0, earnedAt = null, showPill = true, personalL
   const footerLeft = count === 0 ? "Not yet awarded" : `${formatCompact(count)} awarded`;
   const footerRight = earned ? `${personalLabel} ${formatDate(String(earnedAt).slice(0, 10))}` : "";
   const pill = earned && showPill ? `<span class="badge-pill" title="You earned this" aria-label="You earned this"><i class="badge-check" aria-hidden="true">&#10003;</i> Earned</span>` : "";
+  const reqTip = `<span class="stat-tip" data-tip="${esc(def.requirement)}" title="${esc(def.requirement)}" tabindex="0" role="img" aria-label="Badge requirement">?</span>`;
   return `<div class="badge-card badge-tier-${def.tier}${earned ? " earned" : ""}">
-    <div class="badge-card-head">${badgeMedallion()}<strong>${esc(name)}</strong>${pill}</div>
+    <div class="badge-card-head">${badgeMedallion()}<strong>${esc(name)}</strong>${reqTip}${pill}</div>
     <p class="badge-card-body">${esc(description)}</p>
     <div class="badge-card-footer">
       <span class="badge-footer-left">${esc(footerLeft)}</span>
@@ -3101,10 +3104,12 @@ function openRouterPanel(connections, { kind, ref = "" }) {
     ? `data-openrouter data-openrouter-scope="org" data-org="${esc(ref)}"`
     : `data-openrouter data-openrouter-scope="user"`;
   const prefix = kind === "org" ? `org-openrouter-${ref}` : "openrouter";
+  const keyTip = "Management keys can't perform inference — Burnfolio only uses it to read token usage analytics. Prefer to keep the key off our servers entirely? The pyro CLI can read usage locally with the same key and upload only daily totals (pyro install --openrouter-key ...), so the key never leaves your machine.";
   return `<section class="integration-panel" ${attrs}>
     <div class="section-head compact"><div><h3>OpenRouter</h3><p class="muted">Connect a management key to import account token usage hourly.</p></div></div>
+    <p class="muted openrouter-help">Needs a <strong>management</strong> key, not an inference key. <a href="https://openrouter.ai/settings/management-keys" target="_blank" rel="noopener">Create one in your OpenRouter settings</a> or see the <a href="https://openrouter.ai/docs/guides/overview/auth/management-api-keys" target="_blank" rel="noopener">management key docs</a>.</p>
     <form class="form-stack" data-openrouter-connect>
-      <label for="${esc(prefix)}-key">Management key</label>
+      <label for="${esc(prefix)}-key">Management key <span class="stat-tip" data-tip="${esc(keyTip)}" title="${esc(keyTip)}" tabindex="0" role="img" aria-label="About management keys">?</span></label>
       <div class="form-row">
         <input id="${esc(prefix)}-key" name="key" type="password" placeholder="sk-or-v1-..." autocomplete="off">
         <input id="${esc(prefix)}-name" name="name" type="text" maxlength="80" placeholder="Name (optional)" autocomplete="off">
@@ -4252,7 +4257,7 @@ function badgeProgressLabel(def, bundle) {
 
 function badgeProgressRow(def, fraction, bundle) {
   const pct = Math.round(Math.min(1, Math.max(0, fraction)) * 100);
-  const tip = def.description;
+  const tip = `${def.description} — ${def.requirement}`;
   return `<div class="badge-progress-row" data-tip="${esc(tip)}" title="${esc(tip)}">
     <div class="badge-progress-row-head"><span>${esc(def.name)}</span><span class="muted">${esc(badgeProgressLabel(def, bundle))}</span></div>
     <div class="goal-progress-track"><div class="goal-progress-fill" style="width:${pct}%"></div></div>
@@ -4504,10 +4509,10 @@ function formatShortDate(value) {
 
 function formatCompact(value) {
   const n = Number(value || 0);
-  if (n >= 1000000000000) return `${trimNumber(n / 1000000000000)}T`;
-  if (n >= 1000000000) return `${trimNumber(n / 1000000000)}B`;
-  if (n >= 1000000) return `${trimNumber(n / 1000000)}M`;
-  if (n >= 1000) return `${trimNumber(n / 1000)}K`;
+  if (n >= 1000000000000) return `${trimNumber(n / 1000000000000)}t`;
+  if (n >= 1000000000) return `${trimNumber(n / 1000000000)}b`;
+  if (n >= 1000000) return `${trimNumber(n / 1000000)}m`;
+  if (n >= 1000) return `${trimNumber(n / 1000)}k`;
   return formatInt(n);
 }
 
