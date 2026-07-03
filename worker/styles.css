@@ -37,6 +37,7 @@
   --bg: var(--burnfolio-paper);
   --ink: var(--burnfolio-ink);
   --muted: var(--burnfolio-ash);
+  --muted-soft: var(--burnfolio-ash-dark);
   --line: var(--burnfolio-line);
   --panel: var(--burnfolio-linen);
   --panel-strong: var(--burnfolio-linen);
@@ -828,6 +829,9 @@ form {
   font-style: normal;
   font-weight: 900;
 }
+.badge-pill .badge-check {
+  color: currentColor;
+}
 .badge-more {
   font-size: 12px;
   font-weight: 700;
@@ -908,11 +912,14 @@ form {
   gap: 12px;
 }
 .badge-card {
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--burnfolio-line);
   background: var(--burnfolio-linen);
   border-radius: 14px;
-  padding: 14px 16px;
+  padding: 14px 16px 0;
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 .badge-card.earned {
   border-color: var(--burnfolio-flame-deep);
@@ -920,6 +927,7 @@ form {
 }
 .badge-card-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
@@ -927,56 +935,61 @@ form {
 .badge-card-head strong {
   font-size: 14px;
   color: var(--burnfolio-ink);
+  min-width: 0;
 }
-.badge-earned-check {
-  margin-left: auto;
-  color: var(--burnfolio-flame-deep);
-  font-weight: 900;
+/* Unearned: full-strength name, subtly dimmed medallion — not a grayed-out card. */
+.badge-card:not(.earned) .badge-medallion {
+  opacity: .55;
+  filter: saturate(.65);
 }
-.badge-card p {
-  margin: 0;
-  font-size: 13px;
-  color: var(--burnfolio-ash);
-}
-.badge-earned-count {
-  margin-top: 8px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: .04em;
-}
-
-/* Chip: used on the /:ref/badges detail page (grouped by tier, earned only). */
-.badge-detail-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.badge-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px 8px 10px;
-  border: 1px solid var(--burnfolio-line);
-  border-radius: var(--burnfolio-r-pill);
-  background: var(--burnfolio-linen);
-  color: var(--burnfolio-ink);
-  font-size: 13px;
-  cursor: help;
-}
-.badge-chip.earned {
-  border-color: var(--burnfolio-flame-deep);
-  background: var(--burnfolio-wash);
-}
-.badge-chip-name {
-  font-weight: 700;
-}
-.badge-chip-meta {
+.badge-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border-radius: var(--burnfolio-r-pill);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.badge-tier-rare .badge-pill { background: rgba(194, 64, 10, .12); color: var(--burnfolio-flame-deep); }
+.badge-tier-uncommon .badge-pill { background: rgba(168, 53, 5, .12); color: var(--burnfolio-ember); }
+.badge-tier-common .badge-pill { background: rgba(187, 166, 142, .25); color: var(--burnfolio-ash); }
+.badge-card-body {
+  margin: 0 0 14px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
   color: var(--burnfolio-ash);
-  font-size: 11px;
-  font-family: "Space Mono", ui-monospace, monospace;
+}
+.badge-card-footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 -16px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--burnfolio-line);
+}
+.badge-footer-left {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--burnfolio-ash);
+}
+.badge-footer-right {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted-soft);
+  white-space: nowrap;
+}
+@media (max-width: 480px) {
+  .badge-card-footer {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
 }
 
 .burning-panel .burning-grid {

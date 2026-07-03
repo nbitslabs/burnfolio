@@ -1962,6 +1962,17 @@ async function badgeEarnedCountsFromTable(env) {
   return counts;
 }
 
+// Per-tier earned-badge counts for one account (OG card rarity strip).
+async function accountBadgeTierCounts(env, accountID) {
+  const rows = await env.DB.prepare("SELECT badge_key FROM account_badges WHERE account_id = ?").bind(accountID).all();
+  const counts = { rare: 0, uncommon: 0, common: 0 };
+  for (const row of rows.results || []) {
+    const def = badgeDef(row.badge_key);
+    if (def) counts[def.tier]++;
+  }
+  return counts;
+}
+
 async function badgesPage(request, env) {
   const isSignedIn = await signedIn(request, env);
   const user = await requireUser(request, env);
@@ -1982,7 +1993,7 @@ function badgesPageHtml(counts, earnedByViewer, isSignedIn) {
   }));
   const sections = groups.map((group) => `<section class="badge-tier-group">
     <h2>${esc(group.label)}</h2>
-    <div class="badge-grid">${group.defs.map((def) => badgeCard(def, counts[def.key] || 0, earnedByViewer.get(def.key) || null)).join("")}</div>
+    <div class="badge-grid">${group.defs.map((def) => badgeCard(def, { count: counts[def.key] || 0, earnedAt: earnedByViewer.get(def.key) || null, showPill: true, personalLabel: "Yours since" })).join("")}</div>
   </section>`).join("");
   return layout("Badges — Burnfolio", `
     <main class="profile badges-page">
@@ -2008,16 +2019,25 @@ function badgeMedallion() {
   return `<i class="badge-medallion" aria-hidden="true"></i>`;
 }
 
-function badgeCard(def, count, earnedAt) {
+// Shared card: header (medallion + name + earned pill), body (description),
+// footer (community fact left, personal fact right, split by a top border).
+// Used on both /badges (showPill: true, "Yours since") and /:ref/badges
+// (showPill: false — every card there is earned by definition — "Earned").
+function badgeCard(def, { count = 0, earnedAt = null, showPill = true, personalLabel = "Yours since" } = {}) {
   const isSecret = Boolean(def.secret);
   const name = isSecret ? def.secretName : def.name;
   const description = isSecret ? def.secretDescription : def.description;
-  const label = `${count} ${count === 1 ? "builder" : "builders"}`;
   const earned = Boolean(earnedAt);
+  const footerLeft = count === 0 ? "No one has earned this yet" : `Earned by ${count} ${count === 1 ? "builder" : "builders"}`;
+  const footerRight = earned ? `${personalLabel} ${formatDate(String(earnedAt).slice(0, 10))}` : "";
+  const pill = earned && showPill ? `<span class="badge-pill" title="You earned this" aria-label="You earned this"><i class="badge-check" aria-hidden="true">&#10003;</i> Earned</span>` : "";
   return `<div class="badge-card badge-tier-${def.tier}${earned ? " earned" : ""}">
-    <div class="badge-card-head">${badgeMedallion()}<strong>${esc(name)}</strong>${earned ? `<span class="badge-earned-check" title="You earned this" aria-label="You earned this">&#10003;</span>` : ""}</div>
-    <p>${esc(description)}</p>
-    ${earned ? `<p class="badge-earned-count">Earned ${esc(formatDate(earnedAt.slice(0, 10)))} &middot; earned by ${esc(label)}</p>` : `<p class="badge-earned-count">Earned by ${esc(label)}</p>`}
+    <div class="badge-card-head">${badgeMedallion()}<strong>${esc(name)}</strong>${pill}</div>
+    <p class="badge-card-body">${esc(description)}</p>
+    <div class="badge-card-footer">
+      <span class="badge-footer-left">${esc(footerLeft)}</span>
+      ${footerRight ? `<span class="badge-footer-right">${esc(footerRight)}</span>` : ""}
+    </div>
   </div>`;
 }
 
@@ -2060,23 +2080,14 @@ async function profileBadgesPage(request, env, ref) {
   const profile = await buildProfile(env, ref);
   const isSignedIn = await signedIn(request, env);
   if (!profile) return html(notFoundPage(isSignedIn), 404);
-  const { earnedRows } = await profileBadgeStats(env, profile);
-  return html(profileBadgesHtml(profile, earnedRows, isSignedIn));
+  const [{ earnedRows }, counts] = await Promise.all([
+    profileBadgeStats(env, profile),
+    badgeEarnedCountsFromTable(env),
+  ]);
+  return html(profileBadgesHtml(profile, earnedRows, counts, isSignedIn));
 }
 
-function badgeDetailChip(row) {
-  const def = badgeDef(row.badge_key);
-  if (!def) return "";
-  const tip = `${def.description} (${badgeTooltip(def)})`;
-  const dateLabel = formatDate(String(row.earned_at || "").slice(0, 10));
-  return `<div class="badge-chip earned badge-tier-${def.tier}" data-tip="${esc(tip)}" title="${esc(tip)}" tabindex="0">
-    ${badgeMedallion()}
-    <span class="badge-chip-name">${esc(def.name)}</span>
-    <span class="badge-chip-meta"><i class="badge-check" aria-hidden="true">&#10003;</i> Earned ${esc(dateLabel)}</span>
-  </div>`;
-}
-
-function profileBadgesHtml(profile, earnedRows, isSignedIn) {
+function profileBadgesHtml(profile, earnedRows, counts, isSignedIn) {
   const name = profile.account.handle || profile.account.account_number;
   const hasHandle = Boolean(profile.account.handle);
   const hasLabel = Boolean(profile.account.display_name && profile.account.display_name !== "Anonymous builder" && profile.account.display_name !== profile.account.account_number);
@@ -2091,7 +2102,10 @@ function profileBadgesHtml(profile, earnedRows, isSignedIn) {
   })).filter((group) => group.rows.length);
   const sections = groups.map((group) => `<section class="badge-tier-group">
     <h2>${esc(group.label)}</h2>
-    <div class="badge-detail-list">${group.rows.map((row) => badgeDetailChip(row)).join("")}</div>
+    <div class="badge-grid">${group.rows.map((row) => {
+      const def = badgeDef(row.badge_key);
+      return badgeCard(def, { count: counts[row.badge_key] || 0, earnedAt: row.earned_at, showPill: false, personalLabel: "Earned" });
+    }).join("")}</div>
   </section>`).join("");
   const body = earnedRows.length ? sections : emptyState("No badges yet", `${displayName} hasn't earned any badges yet.`);
   return layout(`${displayName}'s badges — Burnfolio`, `
@@ -2174,17 +2188,20 @@ function leaderboardRow(entry) {
 async function ogProfilePage(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return svgResponse(ogLandingFallbackSVG("Profile not found"), 404);
-  return svgResponse(ogProfileSVG(profile));
+  const badgeCounts = await accountBadgeTierCounts(env, profile.account.id);
+  return svgResponse(ogProfileSVG(profile, badgeCounts));
 }
 
 async function ogProfilePNGPage(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return pngResponse(ogFallbackPNG("PROFILE NOT FOUND"), 404, 60);
-  const cacheKey = new Request(`https://cache.internal/og-png/${encodeURIComponent(ref)}/${profile.total_tokens}`);
+  const badgeCounts = await accountBadgeTierCounts(env, profile.account.id);
+  const badgeKey = `${badgeCounts.rare}-${badgeCounts.uncommon}-${badgeCounts.common}`;
+  const cacheKey = new Request(`https://cache.internal/og-png/${encodeURIComponent(ref)}/${profile.total_tokens}/${badgeKey}`);
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
   if (cached) return cached;
-  const response = pngResponse(ogProfilePNG(profile), 200, 600);
+  const response = pngResponse(ogProfilePNG(profile, badgeCounts), 200, 600);
   await cache.put(cacheKey, response.clone());
   return response;
 }
@@ -2402,12 +2419,12 @@ function summarizeSourceRows(rows) {
 }
 
 async function profileEconomics(env, account) {
-  if (!account.show_model_breakdown) return { hasBreakdown: false, byTool: [], topModels: [] };
+  if (!account.show_model_breakdown) return { enabled: false, hasBreakdown: false, byTool: [], topModels: [] };
   const since = sameDatePreviousYear(todayUTCDate()).toISOString().slice(0, 10);
   const isOrg = account.kind === "org";
   const sourceRows = isOrg ? await orgSourceRows(env, account.id, since) : await userSourceRows(env, account.id, since);
   const breakdown = summarizeSourceRows(sourceRows);
-  return { hasBreakdown: sourceRows.length > 0, byTool: breakdown.byTool, topModels: breakdown.topModels };
+  return { enabled: true, hasBreakdown: sourceRows.length > 0, byTool: breakdown.byTool, topModels: breakdown.topModels };
 }
 
 const LEADERBOARD_LIMIT = 50;
@@ -3380,8 +3397,98 @@ function svgEmbed(profile, theme = "orange", mode = "dark") {
 </svg>`;
 }
 
-function ogProfileSVG(profile) {
+// Average glyph-width-to-font-size ratios per font family used in the OG SVG.
+// There's no DOM/canvas available server-side to measure real text, so these
+// are calibrated approximations (checked against real browser rendering) —
+// good enough to keep every element inside its budget without overlap.
+const OG_FONT_RATIO = { display: 0.62, mono: 0.62, sans: 0.58 };
+
+function ogTextWidth(text, size, family) {
+  return String(text || "").length * size * (OG_FONT_RATIO[family] || 0.6);
+}
+
+function ogTruncate(text, size, family, maxWidth) {
+  const str = String(text || "");
+  if (ogTextWidth(str, size, family) <= maxWidth) return str;
+  let value = str;
+  while (value.length > 1 && ogTextWidth(`${value}…`, size, family) > maxWidth) value = value.slice(0, -1);
+  return `${value}…`;
+}
+
+// Handle truncation/downscale: try the full title size first, then two
+// smaller steps, only truncating with an ellipsis if it still doesn't fit
+// at the smallest step. Keeps ~18-char handles (e.g. "pokeapallascat") at
+// full size, per the stated budget below.
+function ogTitleLayout(displayName, maxWidth) {
+  const steps = [58, 46, 36];
+  for (const size of steps) {
+    if (ogTextWidth(displayName, size, "display") <= maxWidth) return { text: displayName, size };
+  }
+  const size = steps[steps.length - 1];
+  return { text: ogTruncate(displayName, size, "display", maxWidth), size };
+}
+
+// Left-to-right stats row (token total, active days, best day) with a fixed
+// minimum gap, dropping trailing items that would overflow into the
+// right-aligned profile URL — never overlapping, never clipping mid-glyph.
+function ogStatsLayout(profile) {
+  const urlSize = 22;
+  const rightEdge = 1116;
   const ref = profile.account.handle || profile.account.account_number;
+  const urlPrefix = "burnfolio.ai/";
+  const urlBudget = 500;
+  let urlText = `${urlPrefix}${ref}`;
+  if (ogTextWidth(urlText, urlSize, "sans") > urlBudget) {
+    const refBudget = urlBudget - ogTextWidth(urlPrefix, urlSize, "sans");
+    urlText = urlPrefix + ogTruncate(ref, urlSize, "sans", Math.max(refBudget, urlSize * 2));
+  }
+  const urlLeft = rightEdge - ogTextWidth(urlText, urlSize, "sans");
+
+  const startX = 86;
+  const gap = 20;
+  const rowMaxX = urlLeft - 24;
+
+  const tokensSize = 28;
+  const tokensFull = `${formatInt(profile.total_tokens)} tokens`;
+  const tokensText = ogTextWidth(tokensFull, tokensSize, "mono") > 340 ? `${formatCompact(profile.total_tokens)} tokens` : tokensFull;
+  const best = profile.stats.best_day ? `Best day ${formatCompact(profile.stats.best_day_tokens)}` : "Install pyro to light it up";
+  const items = [
+    { text: tokensText, size: tokensSize, family: "mono", color: "#211405", weight: 700 },
+    { text: `${formatInt(profile.stats.active_days)} active days`, size: 22, family: "mono", color: "#6F5F4D", weight: 400 },
+    { text: best, size: 22, family: "mono", color: "#6F5F4D", weight: 400 },
+  ];
+  const laid = [];
+  let cursor = startX;
+  for (const item of items) {
+    const w = ogTextWidth(item.text, item.size, item.family);
+    if (cursor + w > rowMaxX) break;
+    laid.push({ ...item, x: cursor });
+    cursor += w + gap;
+  }
+  return { items: laid, url: { text: urlText, x: urlLeft, size: urlSize } };
+}
+
+const OG_BADGE_TIER_ORDER = [
+  { tier: "rare", color: "#C2400A" },
+  { tier: "uncommon", color: "#A83505" },
+  { tier: "common", color: "#BBA68E" },
+];
+
+function ogBadgeDotsSVG(counts, x, y) {
+  let cursor = x;
+  const parts = [];
+  for (const { tier, color } of OG_BADGE_TIER_ORDER) {
+    const n = (counts && counts[tier]) || 0;
+    if (!n) continue;
+    const label = String(n);
+    parts.push(`<circle cx="${cursor + 6}" cy="${y - 6}" r="6" fill="${color}"/>`);
+    parts.push(`<text x="${cursor + 18}" y="${y}" fill="#6F5F4D" font-family="Space Mono, monospace" font-size="18" font-weight="700">${esc(label)}</text>`);
+    cursor += 18 + ogTextWidth(label, 18, "mono") + 22;
+  }
+  return parts.join("");
+}
+
+function ogProfileSVG(profile, badgeCounts = { rare: 0, uncommon: 0, common: 0 }) {
   const displayName = profile.account.handle || profile.account.display_name || profile.account.account_number;
   const cells = heatmapCellData(profile.days, heatmapScale(profile.days));
   const colors = ["#F2E7D9", "#FBD089", "#F99B3C", "#F2611C", "#D6300B"];
@@ -3394,7 +3501,12 @@ function ogProfileSVG(profile) {
     const y = top + (i % 7) * (cell + gap);
     return `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" fill="${colors[day.level]}"/>`;
   }).join("");
-  const best = profile.stats.best_day ? `Best day ${formatCompact(profile.stats.best_day_tokens)}` : "Install pyro to light it up";
+  const title = ogTitleLayout(displayName, 1032);
+  const stats = ogStatsLayout(profile);
+  const statsText = stats.items.map((item) =>
+    `<text x="${item.x}" y="540" fill="${item.color}" font-family="Space Mono, monospace" font-size="${item.size}" font-weight="${item.weight}">${esc(item.text)}</text>`
+  ).join("");
+  const badgeDots = ogBadgeDotsSVG(badgeCounts, 86, 505);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="${esc(displayName)} Burnfolio burn graph">
   <defs>
     <radialGradient id="warmA" cx="88%" cy="0%" r="70%"><stop offset="0" stop-color="#FFC23D" stop-opacity=".36"/><stop offset="1" stop-color="#FFF9F2" stop-opacity="0"/></radialGradient>
@@ -3409,11 +3521,11 @@ function ogProfileSVG(profile) {
     <text x="84" y="48" fill="#211405" font-family="Bricolage Grotesque, Arial, sans-serif" font-size="42" font-weight="800" letter-spacing="-.8">Burnfolio</text>
   </g>
   <text x="86" y="202" fill="#A83505" font-family="Space Mono, monospace" font-size="18" font-weight="700" letter-spacing="2">SHOW YOUR BURN</text>
-  <text x="84" y="270" fill="#211405" font-family="Bricolage Grotesque, Arial, sans-serif" font-size="58" font-weight="800" letter-spacing="-1.6">${esc(displayName)}</text>
-  <text x="86" y="540" fill="#211405" font-family="Space Mono, monospace" font-size="28" font-weight="700">${formatInt(profile.total_tokens)} tokens</text>
-  <text x="430" y="540" fill="#6F5F4D" font-family="Space Mono, monospace" font-size="22">${formatInt(profile.stats.active_days)} active days · ${esc(best)}</text>
+  <text x="84" y="270" fill="#211405" font-family="Bricolage Grotesque, Arial, sans-serif" font-size="${title.size}" font-weight="800" letter-spacing="-1.6">${esc(title.text)}</text>
+  ${badgeDots}
+  ${statsText}
   ${rects}
-  <text x="1116" y="557" text-anchor="end" fill="#A83505" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="22" font-weight="700">burnfolio.ai/${esc(ref)}</text>
+  <text x="1116" y="557" text-anchor="end" fill="#A83505" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="${stats.url.size}" font-weight="700">${esc(stats.url.text)}</text>
 </svg>`;
 }
 
@@ -3421,7 +3533,19 @@ function ogLandingFallbackSVG(message) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><rect width="1200" height="630" fill="#FFF9F2"/><text x="80" y="320" fill="#211405" font-family="Arial, sans-serif" font-size="56" font-weight="700">${esc(message)}</text></svg>`;
 }
 
-function ogProfilePNG(profile) {
+function ogPngBadgeDots(image, counts, x, y) {
+  let cursor = x;
+  for (const { tier, color } of OG_BADGE_TIER_ORDER) {
+    const n = (counts && counts[tier]) || 0;
+    if (!n) continue;
+    image.disc(cursor + 6, y + 3, 6, color);
+    const label = String(n);
+    image.text(label, cursor + 18, y, 2, "#6F5F4D", 60);
+    cursor += 18 + measureBitmap(label.toUpperCase(), 2) + 26;
+  }
+}
+
+function ogProfilePNG(profile, badgeCounts = { rare: 0, uncommon: 0, common: 0 }) {
   const width = 1200;
   const height = 630;
   const image = landingOGCanvas() || pngCanvas(width, height, "#FFF9F2");
@@ -3429,7 +3553,9 @@ function ogProfilePNG(profile) {
   const cells = heatmapCellData(profile.days, heatmapScale(profile.days));
   const heat = ["#F2E7D9", "#FBD089", "#F99B3C", "#F2611C", "#D6300B"];
 
-  image.rect(72, 322, 1058, 278, "#FFF9F2");
+  // Extended a little from the original 278px tall patch so the new
+  // two-row stats block (row + URL line) always stays on clean background.
+  image.rect(72, 322, 1058, 296, "#FFF9F2");
 
   const startX = 78;
   const startY = 330;
@@ -3441,12 +3567,38 @@ function ogProfilePNG(profile) {
     image.roundRect(x, y, cell, cell, 2, heat[cells[i].level]);
   }
 
+  ogPngBadgeDots(image, badgeCounts, 76, 500);
+
+  // Handle: generous budget, step the scale down before ever truncating —
+  // keeps ~14-char handles (e.g. "pokeapallascat") fully readable.
+  const handleMaxWidth = 340;
+  const handleScale = measureBitmap(ref.toUpperCase(), 3) <= handleMaxWidth ? 3 : 2;
+  const handleWidth = Math.min(measureBitmap(ref.toUpperCase(), handleScale), handleMaxWidth);
+  image.text(ref, 76, 552, handleScale, "#A83505", handleMaxWidth);
+
+  // Sequential stats row (tokens, active days, best day): starts right after
+  // the handle's actual rendered width, drops trailing items rather than
+  // ever overlapping — never a fixed slot that assumes a fixed handle width.
+  const rowY = handleScale === 3 ? 560 : 555;
+  const rowMaxX = 1124;
+  const tokensFull = `${formatInt(profile.total_tokens)} tokens burned`;
+  const tokensText = measureBitmap(tokensFull.toUpperCase(), 2) > 320 ? `${formatCompact(profile.total_tokens)} tokens burned` : tokensFull;
   const best = profile.stats.best_day ? `best ${formatCompact(profile.stats.best_day_tokens)}` : "best pending";
-  image.text(ref, 76, 568, 3, "#A83505", 230);
-  image.text(`${formatCompact(profile.total_tokens)} tokens burned`, 312, 572, 2, "#A83505", 250);
-  image.text(`${formatInt(profile.stats.active_days)} active days`, 578, 572, 2, "#A83505", 175);
-  image.text(best, 770, 572, 2, "#A83505", 112);
-  image.text(`burnfolio.ai/${ref}`, 890, 572, 2, "#211405", 300);
+  let cursor = 76 + handleWidth + 28;
+  for (const itemText of [tokensText, `${formatInt(profile.stats.active_days)} active days`, best]) {
+    const w = measureBitmap(itemText.toUpperCase(), 2);
+    if (cursor + w > rowMaxX) break;
+    image.text(itemText, cursor, rowY, 2, "#A83505", w + 4);
+    cursor += w + 24;
+  }
+
+  // Profile URL: its own line below, right-aligned, own truncation budget —
+  // guaranteed never to collide with the row above regardless of its length.
+  const urlY = 594;
+  const urlMaxWidth = 320;
+  const urlText = `burnfolio.ai/${ref}`;
+  const urlWidth = Math.min(measureBitmap(urlText.toUpperCase(), 2), urlMaxWidth);
+  image.text(urlText, 1124 - urlWidth, urlY, 2, "#211405", urlMaxWidth);
 
   return image.png();
 }
@@ -4038,7 +4190,7 @@ function badgeAchievementRow(row) {
     ${badgeMedallion()}
     <span class="badge-achievement-name">${esc(def.name)}</span>
     <span class="badge-achievement-tier">${esc(BADGE_TIERS[def.tier])}</span>
-    <span class="badge-achievement-date">${esc(dateLabel)}</span>
+    <span class="badge-achievement-date badge-footer-right">${esc(dateLabel)}</span>
   </div>`;
 }
 
@@ -4053,7 +4205,13 @@ function badgeRecentAchievements(ref, earnedRows) {
 }
 
 function sourceBreakdownSection(economics) {
-  if (!economics || !economics.hasBreakdown) return "";
+  if (!economics || !economics.enabled) return "";
+  if (!economics.hasBreakdown) {
+    return `<section class="graph burning-panel">
+      <div class="section-head"><div><h2>What's burning</h2><p class="muted">Past year, by tool and model.</p></div></div>
+      ${emptyState("No breakdown data yet", "The tool & model breakdown is on, but there's no per-tool usage in the past year yet. Sync with pyro to start filling this in.")}
+    </section>`;
+  }
   const toolBars = economics.byTool.map((row) => `
     <div class="tool-bar">
       <div class="tool-bar-label"><span>${esc(row.cli)}</span><span>${formatCompact(row.tokens)} · ${Math.round(row.pct * 100)}%</span></div>
