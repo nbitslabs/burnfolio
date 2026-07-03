@@ -990,17 +990,6 @@ form {
 .leaderboard-cta:hover {
   background: var(--burnfolio-wash);
 }
-.leaderboard-group {
-  margin-top: 28px;
-}
-.leaderboard-group:first-of-type {
-  margin-top: 0;
-}
-.leaderboard-group-title {
-  font-size: 15px;
-  margin: 0 0 12px;
-  color: var(--burnfolio-ink);
-}
 .leaderboard-list {
   display: grid;
   gap: 10px;
@@ -1465,7 +1454,6 @@ body.share-open {
   color: var(--burnfolio-ink);
 }
 .goal-panel {
-  margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--burnfolio-line);
 }
@@ -1493,7 +1481,6 @@ body.share-open {
   margin: 8px 0 0;
 }
 .goals-panel .goal-panel {
-  margin-top: 0;
   padding-top: 0;
   border-top: none;
 }
@@ -1575,6 +1562,19 @@ body.share-open {
 .panel {
   min-width: 0;
   padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+/* Flex children don't collapse margins with the gap, so any leftover ad-hoc
+   margin on a direct panel child would stack on top of it. Zero them out —
+   the panel's own gap is the single source of vertical rhythm. */
+/* :not() bumps specificity above single-class component rules (.section-head,
+   .form-stack, etc.) regardless of their position in the file, so this reliably
+   wins instead of depending on source order. */
+.panel > *:not([data-never]) {
+  margin-top: 0;
+  margin-bottom: 0;
 }
 .section-head {
   display: flex;

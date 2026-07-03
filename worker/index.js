@@ -1815,15 +1815,18 @@ async function leaderboardRoute(request, env) {
 }
 
 async function leaderboardPage(request, env) {
-  const range = cleanLeaderboardRange(new URL(request.url).searchParams.get("range"));
+  const params = new URL(request.url).searchParams;
+  const range = cleanLeaderboardRange(params.get("range"));
+  const board = cleanLeaderboardBoard(params.get("board"));
   const payload = await cachedLeaderboard(env, range);
-  return html(leaderboardHtml(payload, await signedIn(request, env)));
+  return html(leaderboardHtml(payload, board, await signedIn(request, env)));
 }
 
-function leaderboardHtml(payload, isSignedIn) {
+function leaderboardHtml(payload, board, isSignedIn) {
   const isWeek = payload.range === "7d";
+  const isOrgs = board === "orgs";
   const individualRows = payload.individuals.map(leaderboardRow).join("") || emptyState("No burn yet", "Sync usage with pyro to appear on the leaderboard.");
-  const orgRows = payload.organizations.map(leaderboardRow).join("");
+  const orgRows = payload.organizations.map(leaderboardRow).join("") || emptyState("No organizations on the board yet", "Create one from your dashboard.");
   const claimCTA = isSignedIn ? "" : `<a class="leaderboard-cta" href="/signup">Your burn belongs here. Claim your spot &rarr;</a>`;
   return layout("Leaderboard — Burnfolio", `
     <main class="profile leaderboard-page">
@@ -1835,18 +1838,15 @@ function leaderboardHtml(payload, isSignedIn) {
         </div>
       </header>
       <nav class="embed-theme-tabs leaderboard-tabs" role="tablist" aria-label="Leaderboard range">
-        <a class="theme-tab${isWeek ? "" : " active"}" role="tab" aria-selected="${isWeek ? "false" : "true"}" href="/leaderboard">All time</a>
-        <a class="theme-tab${isWeek ? " active" : ""}" role="tab" aria-selected="${isWeek ? "true" : "false"}" href="/leaderboard?range=7d">Last 7 days</a>
+        <a class="theme-tab${isWeek ? "" : " active"}" role="tab" aria-selected="${isWeek ? "false" : "true"}" href="${leaderboardURL("all", board)}">All time</a>
+        <a class="theme-tab${isWeek ? " active" : ""}" role="tab" aria-selected="${isWeek ? "true" : "false"}" href="${leaderboardURL("7d", board)}">Last 7 days</a>
+      </nav>
+      <nav class="embed-theme-tabs leaderboard-tabs" role="tablist" aria-label="Leaderboard board">
+        <a class="theme-tab${isOrgs ? "" : " active"}" role="tab" aria-selected="${isOrgs ? "false" : "true"}" href="${leaderboardURL(payload.range, "individuals")}">Individuals</a>
+        <a class="theme-tab${isOrgs ? " active" : ""}" role="tab" aria-selected="${isOrgs ? "true" : "false"}" href="${leaderboardURL(payload.range, "orgs")}">Organizations</a>
       </nav>
       ${claimCTA}
-      <section class="leaderboard-group">
-        <h2 class="leaderboard-group-title">Individuals</h2>
-        <div class="leaderboard-list">${individualRows}</div>
-      </section>
-      ${orgRows ? `<section class="leaderboard-group">
-        <h2 class="leaderboard-group-title">Organizations</h2>
-        <div class="leaderboard-list">${orgRows}</div>
-      </section>` : ""}
+      <div class="leaderboard-list">${isOrgs ? orgRows : individualRows}</div>
     </main>
   `, {
     description: "The Burnfolio leaderboard: top AI token burn, all time and last 7 days.",
@@ -2110,6 +2110,17 @@ const LEADERBOARD_LIMIT = 50;
 
 function cleanLeaderboardRange(value) {
   return value === "7d" ? "7d" : "all";
+}
+
+function cleanLeaderboardBoard(value) {
+  return value === "orgs" ? "orgs" : "individuals";
+}
+
+function leaderboardURL(range, board) {
+  const params = [];
+  if (range === "7d") params.push("range=7d");
+  if (board === "orgs") params.push("board=orgs");
+  return `/leaderboard${params.length ? `?${params.join("&")}` : ""}`;
 }
 
 // The full ranked-by-clamped-total account list (all accounts with nonzero
