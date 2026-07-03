@@ -1257,6 +1257,63 @@ body.share-open {
   margin-top: 30px;
 }
 .primary-panel { grid-row: span 2; }
+.history-panel {
+  margin-top: 16px;
+}
+.history-chart-wrap {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+.history-chart {
+  display: block;
+  width: 100%;
+  min-width: 560px;
+  height: auto;
+}
+.history-tools {
+  margin-top: 20px;
+}
+.history-tools h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--burnfolio-ink);
+}
+.history-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+.history-table-wrap {
+  margin-top: 18px;
+  overflow-x: auto;
+}
+.history-table {
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.history-table th,
+.history-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--burnfolio-line);
+  white-space: nowrap;
+}
+.history-table th {
+  color: var(--burnfolio-ash);
+  font-family: "Space Mono", ui-monospace, monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: 900;
+}
+.history-table td:nth-child(4),
+.history-table td:nth-child(5) {
+  text-transform: capitalize;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .panel {
   min-width: 0;
   padding: 20px;

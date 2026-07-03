@@ -93,6 +93,8 @@ async function route(request, env) {
   if (path === "/api/email" && request.method === "POST") return attachEmail(request, env);
   if (path === "/api/logout" && request.method === "POST") return logout(request, env);
   if (path === "/api/me") return me(request, env);
+  if (path === "/api/me/usage.csv" && (request.method === "GET" || request.method === "HEAD")) return usageDailyCSVRoute(request, env);
+  if (path === "/api/me/usage-breakdown.csv" && (request.method === "GET" || request.method === "HEAD")) return usageBreakdownCSVRoute(request, env);
   if (path === "/api/global/stats" && (request.method === "GET" || request.method === "HEAD")) return globalStatsResponse(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/profile" && request.method === "PATCH") return updateUserProfileRoute(request, env);
@@ -329,6 +331,86 @@ async function me(request, env) {
     machines: machines.results,
     orgs: rows.filter((row) => row.status === "active"),
     invites: rows.filter((row) => row.status === "pending"),
+  });
+}
+
+async function usageDailyCSVRoute(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const account = await accountView(env, user.id);
+  const rows = await userDailyComponentRows(env, user.id);
+  return csvResponse(usageDailyCSV(rows), csvFilename(account, "daily"));
+}
+
+async function usageBreakdownCSVRoute(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const account = await accountView(env, user.id);
+  const rows = await userDailySourceRows(env, user.id);
+  return csvResponse(usageBreakdownCSV(rows), csvFilename(account, "breakdown"));
+}
+
+function csvFilename(account, suffix) {
+  const ref = String((account && (account.handle || account.account_number)) || "burnfolio").replace(/[^a-zA-Z0-9_-]/g, "") || "burnfolio";
+  return `burnfolio-${ref}-${suffix}.csv`;
+}
+
+function csvField(value) {
+  const text = value === null || value === undefined ? "" : String(value);
+  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function csvLine(values) {
+  return values.map(csvField).join(",") + "\r\n";
+}
+
+function usageDailyCSV(rows) {
+  let out = csvLine(["date_utc", "records", "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens"]);
+  for (const row of rows) {
+    out += csvLine([
+      row.date_utc,
+      int(row.records),
+      int(row.input_tokens),
+      int(row.cache_read_tokens),
+      int(row.cache_write_tokens),
+      int(row.output_tokens),
+      int(row.reasoning_tokens),
+      int(row.total_tokens),
+    ]);
+  }
+  return out;
+}
+
+function usageBreakdownCSV(rows) {
+  let out = csvLine(["date_utc", "cli", "model", "records", "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens", "total_tokens"]);
+  for (const row of rows) {
+    out += csvLine([
+      row.date_utc,
+      row.cli,
+      row.model,
+      int(row.records),
+      int(row.input_tokens),
+      int(row.cache_read_tokens),
+      int(row.cache_write_tokens),
+      int(row.output_tokens),
+      int(row.reasoning_tokens),
+      int(row.total_tokens),
+    ]);
+  }
+  return out;
+}
+
+function csvResponse(text, filename) {
+  const safeFilename = filename.replace(/["\r\n]/g, "");
+  return new Response(text, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${safeFilename}"`,
+      "Cache-Control": "no-store",
+      ...securityHeaders(),
+    },
   });
 }
 
@@ -1469,6 +1551,64 @@ async function orgSourceRows(env, orgID, sinceDate) {
   return rows.results || [];
 }
 
+// Personal (org_id IS NULL machines only), full history, raw/unclamped — used by
+// the dashboard history chart/table and the CSV export. Unlike userDays, this is
+// never shown publicly, so there's no reason to clamp it.
+async function userDailyComponentRows(env, userID) {
+  const rows = await env.DB.prepare(`
+    SELECT date_utc,
+      SUM(records) AS records,
+      SUM(input_tokens) AS input_tokens,
+      SUM(cache_read_tokens) AS cache_read_tokens,
+      SUM(cache_write_tokens) AS cache_write_tokens,
+      SUM(output_tokens) AS output_tokens,
+      SUM(reasoning_tokens) AS reasoning_tokens,
+      SUM(total_tokens) AS total_tokens
+    FROM (
+      SELECT d.date_utc, d.records, d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens, d.reasoning_tokens, d.total_tokens
+      FROM daily_machine_usage d
+      JOIN machines mm ON mm.id = d.machine_id
+      WHERE d.user_id = ? AND mm.org_id IS NULL
+      UNION ALL
+      SELECT date_utc, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens
+      FROM openrouter_daily_usage
+      WHERE account_id = ?
+    )
+    GROUP BY date_utc
+    ORDER BY date_utc
+  `).bind(userID, userID).all();
+  return rows.results || [];
+}
+
+// Same scope as userDailyComponentRows but broken out per (date, cli, model),
+// aggregated across the user's machines — used by the tool-split/top-tool-per-day
+// dashboard views and the breakdown CSV.
+async function userDailySourceRows(env, userID) {
+  const rows = await env.DB.prepare(`
+    SELECT date_utc, cli, model,
+      SUM(records) AS records,
+      SUM(input_tokens) AS input_tokens,
+      SUM(cache_read_tokens) AS cache_read_tokens,
+      SUM(cache_write_tokens) AS cache_write_tokens,
+      SUM(output_tokens) AS output_tokens,
+      SUM(reasoning_tokens) AS reasoning_tokens,
+      SUM(total_tokens) AS total_tokens
+    FROM (
+      SELECT s.date_utc, s.cli, s.model, s.records, s.input_tokens, s.cache_read_tokens, s.cache_write_tokens, s.output_tokens, s.reasoning_tokens, s.total_tokens
+      FROM daily_machine_source_usage s
+      JOIN machines mm ON mm.id = s.machine_id
+      WHERE s.user_id = ? AND mm.org_id IS NULL
+      UNION ALL
+      SELECT o.date_utc, 'openrouter' AS cli, o.model, o.records, o.input_tokens, o.cache_read_tokens, o.cache_write_tokens, o.output_tokens, o.reasoning_tokens, o.total_tokens
+      FROM openrouter_daily_model_usage o
+      WHERE o.account_id = ?
+    )
+    GROUP BY date_utc, cli, model
+    ORDER BY date_utc, total_tokens DESC
+  `).bind(userID, userID).all();
+  return rows.results || [];
+}
+
 function summarizeSourceRows(rows) {
   const total = rows.reduce((sum, r) => sum + int(r.total_tokens), 0);
   const byToolMap = new Map();
@@ -1984,6 +2124,7 @@ async function appPage(request, env) {
   const emailSummary = emails.length
     ? ` · ${esc(emails[0].email)}${emails[0].verified_at ? " verified" : " pending"}`
     : "";
+  const history = await historyPanel(env, user.id);
   return layout("Burnfolio dashboard", `
     <main class="dash">
       <header class="dash-head">
@@ -2019,6 +2160,7 @@ async function appPage(request, env) {
           <div class="list">${orgs.results.map(orgRow).join("") || emptyState("No organizations yet", "Create an org when you want a shared burn graph for a team.")}</div>
         </section>
       </div>
+      ${history}
     </main>
     <script>${dashboardScript(profileRef)}</script>
   `, { signedIn: true });
@@ -2989,6 +3131,144 @@ function sourceBreakdownSection(economics) {
   </section>`;
 }
 
+const HISTORY_CHART_DAYS = 90;
+const HISTORY_TABLE_DAYS = 30;
+
+async function historyPanel(env, userID) {
+  const [componentRows, sourceRows] = await Promise.all([
+    userDailyComponentRows(env, userID),
+    userDailySourceRows(env, userID),
+  ]);
+  if (!componentRows.length) {
+    return `<section class="panel history-panel">
+      <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show recent activity.</p></div></div>
+      ${emptyState("No usage yet", "Sync with pyro or connect OpenRouter to start filling in your history.")}
+    </section>`;
+  }
+
+  const today = todayUTCDate();
+  const todayKey = today.toISOString().slice(0, 10);
+  const start90 = dateOffsetUTC(todayKey, -(HISTORY_CHART_DAYS - 1));
+  const start30 = dateOffsetUTC(todayKey, -(HISTORY_TABLE_DAYS - 1));
+
+  const componentByDate = new Map(componentRows.map((r) => [r.date_utc, r]));
+  const last90 = [];
+  for (let d = parseUTCDate(start90); d <= today; d.setUTCDate(d.getUTCDate() + 1)) {
+    const key = d.toISOString().slice(0, 10);
+    const row = componentByDate.get(key);
+    last90.push({ date_utc: key, total_tokens: row ? int(row.total_tokens) : 0 });
+  }
+
+  const sourceByDate = dailyTopBreakdown(sourceRows);
+  const toolTotals90 = summarizeSourceRows(sourceRows.filter((r) => r.date_utc >= start90));
+
+  const tableRows = [];
+  for (let d = new Date(today); d >= parseUTCDate(start30); d.setUTCDate(d.getUTCDate() - 1)) {
+    const key = d.toISOString().slice(0, 10);
+    const row = componentByDate.get(key);
+    const top = sourceByDate.get(key);
+    tableRows.push({
+      date_utc: key,
+      total_tokens: row ? int(row.total_tokens) : 0,
+      records: row ? int(row.records) : 0,
+      topCli: top ? top.topCli : "",
+      topModel: top ? top.topModel : "",
+    });
+  }
+
+  return `<section class="panel history-panel">
+    <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show the last ${HISTORY_CHART_DAYS} days.</p></div></div>
+    <div class="history-chart-wrap">${historyBarChartSVG(last90)}</div>
+    ${historyToolSplit(toolTotals90)}
+    <div class="history-actions">
+      <a class="button secondary" href="/api/me/usage.csv">Download CSV (daily totals)</a>
+      <a class="button secondary" href="/api/me/usage-breakdown.csv">Download CSV (by tool &amp; model)</a>
+    </div>
+    ${historyTable(tableRows)}
+  </section>`;
+}
+
+function dailyTopBreakdown(sourceRows) {
+  const byDate = new Map();
+  for (const row of sourceRows) {
+    if (!byDate.has(row.date_utc)) byDate.set(row.date_utc, { cli: new Map(), model: new Map() });
+    const bucket = byDate.get(row.date_utc);
+    const tokens = int(row.total_tokens);
+    bucket.cli.set(row.cli, (bucket.cli.get(row.cli) || 0) + tokens);
+    bucket.model.set(row.model, (bucket.model.get(row.model) || 0) + tokens);
+  }
+  const result = new Map();
+  for (const [date, bucket] of byDate) {
+    const topCli = [...bucket.cli.entries()].sort((a, b) => b[1] - a[1])[0];
+    const topModel = [...bucket.model.entries()].sort((a, b) => b[1] - a[1])[0];
+    result.set(date, { topCli: topCli ? topCli[0] : "", topModel: topModel ? topModel[0] : "" });
+  }
+  return result;
+}
+
+function historyBarChartSVG(days) {
+  const barWidth = 6;
+  const gap = 2;
+  const left = 40;
+  const top = 10;
+  const chartHeight = 130;
+  const bottomAxis = 22;
+  const n = days.length;
+  const width = left + n * (barWidth + gap);
+  const height = top + chartHeight + bottomAxis;
+  const max = Math.max(1, ...days.map((d) => int(d.total_tokens)));
+  const baseline = top + chartHeight;
+  const bars = days.map((day, i) => {
+    const value = int(day.total_tokens);
+    if (value <= 0) return "";
+    const barHeight = Math.max(2, Math.round((value / max) * chartHeight));
+    const x = left + i * (barWidth + gap);
+    const y = baseline - barHeight;
+    const tip = `${formatDate(day.date_utc)}: ${formatInt(value)} tokens`;
+    return `<rect x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="1.5" fill="var(--burnfolio-flame, #F2611C)" data-tip="${esc(tip)}" tabindex="0" role="img" aria-label="${esc(tip)}"><title>${esc(tip)}</title></rect>`;
+  }).join("");
+  const tickEvery = 14;
+  const ticks = days.map((day, i) => {
+    if (i % tickEvery !== 0 && i !== n - 1) return "";
+    const x = left + i * (barWidth + gap) + barWidth / 2;
+    return `<text x="${x}" y="${baseline + 16}" text-anchor="middle" font-family="Space Mono, ui-monospace, monospace" font-size="9" fill="var(--burnfolio-ash, #6F5F4D)">${esc(formatShortDate(day.date_utc))}</text>`;
+  }).join("");
+  return `<svg class="history-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Daily token burn, last ${n} days">
+    <line x1="${left}" y1="${baseline}" x2="${width}" y2="${baseline}" stroke="var(--burnfolio-line, #EEDDCB)" stroke-width="1"/>
+    <text x="${left - 6}" y="${baseline}" text-anchor="end" font-family="Space Mono, ui-monospace, monospace" font-size="10" fill="var(--burnfolio-ash, #6F5F4D)">0</text>
+    <text x="${left - 6}" y="${top + 9}" text-anchor="end" font-family="Space Mono, ui-monospace, monospace" font-size="10" fill="var(--burnfolio-ash, #6F5F4D)">${esc(formatCompact(max))}</text>
+    ${bars}
+    ${ticks}
+  </svg>`;
+}
+
+function historyToolSplit(breakdown) {
+  if (!breakdown.byTool.length) return "";
+  const bars = breakdown.byTool.map((row) => `
+    <div class="tool-bar">
+      <div class="tool-bar-label"><span>${esc(row.cli)}</span><span>${formatCompact(row.tokens)} · ${Math.round(row.pct * 100)}%</span></div>
+      <div class="tool-bar-track"><div class="tool-bar-fill" style="width:${Math.max(2, Math.round(row.pct * 100))}%"></div></div>
+    </div>`).join("");
+  return `<div class="history-tools"><h3>Tool split, last ${HISTORY_CHART_DAYS} days</h3><div class="tool-bars">${bars}</div></div>`;
+}
+
+function historyTable(rows) {
+  const body = rows.map((row) => `
+    <tr>
+      <td>${esc(formatDate(row.date_utc))}</td>
+      <td>${formatInt(row.total_tokens)}</td>
+      <td>${formatInt(row.records)}</td>
+      <td>${row.topCli ? esc(row.topCli) : "—"}</td>
+      <td>${row.topModel ? esc(row.topModel) : "—"}</td>
+    </tr>`).join("");
+  return `<div class="history-table-wrap">
+    <table class="history-table">
+      <thead><tr><th>Date</th><th>Total tokens</th><th>Records</th><th>Top tool</th><th>Top model</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
+}
+
 const SHARE_EQUIVALENCES = [
   { min: 1_000_000_000_000, unit: 4_000_000_000, label: "the entire English Wikipedia (~4B tokens)" },
   { min: 10_000_000_000, unit: 1_200_000, label: "the complete works of Shakespeare (~1.2M tokens)" },
@@ -3037,6 +3317,13 @@ function formatDate(value) {
   const d = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return value;
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+function formatShortDate(value) {
+  if (!value) return "";
+  const d = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 function formatCompact(value) {
