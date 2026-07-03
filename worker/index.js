@@ -952,7 +952,7 @@ async function cleanupExpiredRecords(env) {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM magic_links WHERE consumed_at IS NOT NULL OR expires_at <= datetime('now')"),
       env.DB.prepare("DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')"),
-      env.DB.prepare("DELETE FROM rate_limits WHERE updated_at <= datetime('now', '-2 days')"),
+      env.DB.prepare("DELETE FROM rate_limits WHERE updated_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 days')"),
     ]);
   } catch (error) {
     console.error("cleanup cron failed", error && error.message ? error.message : error);
@@ -964,7 +964,7 @@ async function syncDueOpenRouterConnections(env) {
     SELECT *
     FROM openrouter_connections
     WHERE status != 'disabled'
-      AND (last_sync_at IS NULL OR last_sync_at <= datetime('now', '-55 minutes'))
+      AND (last_sync_at IS NULL OR last_sync_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-55 minutes'))
     ORDER BY COALESCE(last_sync_at, '1970-01-01') ASC
     LIMIT 25
   `).all();
