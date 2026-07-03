@@ -24,6 +24,7 @@ const RESERVED_HANDLES = new Set([
   "how_we_count",
   "howwecount",
   "leaderboard",
+  "vs",
   "install",
   "uninstall",
   "admin",
@@ -76,13 +77,14 @@ async function route(request, env) {
   if (path === "/og/landing.png") return assetResponse("og-landing.png");
   if (path.match(/^\/og\/[^/]+\.png$/)) return ogProfilePNGPage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
   if (path.match(/^\/og\/[^/]+\.svg$/)) return ogProfilePage(env, decodeURIComponent(path.split("/")[2].slice(0, -4)));
-  if (path === "/") return html(homePage(await signedIn(request, env), await globalStats(request, env), await platformStats(env)));
+  if (path === "/") return html(homePage(await signedIn(request, env), await globalStats(request, env), await platformStats(env), await cachedRecentSyncs(env)));
   if (path === "/signup") return authRoute(request, env, "signup");
   if (path === "/signin") return authRoute(request, env, "signin");
   if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
   if (path === "/privacy") return html(privacyPage(await signedIn(request, env)));
   if (path === "/leaderboard") return leaderboardPage(request, env);
   if (path === "/api/leaderboard" && (request.method === "GET" || request.method === "HEAD")) return leaderboardRoute(request, env);
+  if (path.match(/^\/vs\/[^/]+\/[^/]+$/)) return comparePage(request, env, decodeURIComponent(path.split("/")[2]), decodeURIComponent(path.split("/")[3]));
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/app/orgs") return html(await orgsPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
@@ -92,10 +94,14 @@ async function route(request, env) {
   if (path === "/auth/magic" && request.method === "POST") return consumeMagicLink(request, env);
   if (path === "/api/email" && request.method === "POST") return attachEmail(request, env);
   if (path === "/api/logout" && request.method === "POST") return logout(request, env);
+  if (path === "/api/me" && request.method === "DELETE") return deleteAccountRoute(request, env);
   if (path === "/api/me") return me(request, env);
   if (path === "/api/me/usage.csv" && (request.method === "GET" || request.method === "HEAD")) return usageDailyCSVRoute(request, env);
   if (path === "/api/me/usage-breakdown.csv" && (request.method === "GET" || request.method === "HEAD")) return usageBreakdownCSVRoute(request, env);
+  if (path === "/api/me/export.json" && (request.method === "GET" || request.method === "HEAD")) return meExportRoute(request, env);
+  if (path === "/api/me/delete" && request.method === "POST") return deleteAccountRoute(request, env);
   if (path === "/api/global/stats" && (request.method === "GET" || request.method === "HEAD")) return globalStatsResponse(request, env);
+  if (path === "/api/global/recent" && (request.method === "GET" || request.method === "HEAD")) return recentSyncsRoute(request, env);
   if (path === "/api/handles" && request.method === "POST") return claimHandle(request, env);
   if (path === "/api/profile" && request.method === "PATCH") return updateUserProfileRoute(request, env);
   if (path === "/api/openrouter/ingest" && request.method === "POST") return ingestOpenRouter(request, env);
@@ -350,6 +356,174 @@ async function usageBreakdownCSVRoute(request, env) {
   return csvResponse(usageBreakdownCSV(rows), csvFilename(account, "breakdown"));
 }
 
+// --- Self-serve export ---------------------------------------------------
+
+async function exportEmails(env, userID) {
+  const rows = await env.DB.prepare("SELECT email, verified_at, is_primary, created_at FROM user_emails WHERE user_id = ? ORDER BY created_at").bind(userID).all();
+  return (rows.results || []).map((r) => ({ email: r.email, verified_at: r.verified_at, is_primary: Boolean(r.is_primary), created_at: r.created_at }));
+}
+
+async function exportMachines(env, userID) {
+  const rows = await env.DB.prepare("SELECT machine_number, name, created_at, last_seen_at FROM machines WHERE user_id = ? ORDER BY created_at").bind(userID).all();
+  return rows.results || [];
+}
+
+async function exportDailyMachineUsage(env, userID) {
+  const rows = await env.DB.prepare(`
+    SELECT m.machine_number, d.date_utc, d.records, d.input_tokens, d.cache_read_tokens, d.cache_write_tokens, d.output_tokens, d.reasoning_tokens, d.total_tokens, d.updated_at
+    FROM daily_machine_usage d
+    JOIN machines m ON m.id = d.machine_id
+    WHERE d.user_id = ?
+    ORDER BY d.date_utc, m.machine_number
+  `).bind(userID).all();
+  return rows.results || [];
+}
+
+async function exportDailyMachineSourceUsage(env, userID) {
+  const rows = await env.DB.prepare(`
+    SELECT m.machine_number, s.date_utc, s.cli, s.model, s.records, s.input_tokens, s.cache_read_tokens, s.cache_write_tokens, s.output_tokens, s.reasoning_tokens, s.total_tokens, s.updated_at
+    FROM daily_machine_source_usage s
+    JOIN machines m ON m.id = s.machine_id
+    WHERE s.user_id = ?
+    ORDER BY s.date_utc, m.machine_number, s.cli, s.model
+  `).bind(userID).all();
+  return rows.results || [];
+}
+
+async function exportOpenRouterUsage(env, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT openrouter_key_hash, date_utc, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at
+    FROM openrouter_daily_usage WHERE account_id = ? ORDER BY date_utc
+  `).bind(accountID).all();
+  return rows.results || [];
+}
+
+async function exportOpenRouterModelUsage(env, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT openrouter_key_hash, date_utc, model, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at
+    FROM openrouter_daily_model_usage WHERE account_id = ? ORDER BY date_utc, model
+  `).bind(accountID).all();
+  return rows.results || [];
+}
+
+// owner_user_id catches org-scoped connections this user connected; account_id catches their own personal ones.
+async function exportOpenRouterConnections(env, userID, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT openrouter_key_hash, label, status, last_sync_at, last_error, created_at, updated_at
+    FROM openrouter_connections WHERE owner_user_id = ? OR account_id = ?
+  `).bind(userID, accountID).all();
+  return rows.results || [];
+}
+
+async function exportMemberships(env, userID) {
+  const rows = await env.DB.prepare(`
+    SELECT a.account_number, h.handle, m.role, m.status, m.created_at
+    FROM memberships m
+    JOIN accounts a ON a.id = m.org_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE m.user_id = ?
+  `).bind(userID).all();
+  return (rows.results || []).map((r) => ({ org: r.handle || r.account_number, role: r.role, status: r.status, joined_at: r.created_at }));
+}
+
+async function buildUserExport(env, user) {
+  const account = await accountView(env, user.id);
+  const [emails, machines, dailyUsage, dailySourceUsage, orUsage, orModelUsage, orConnections, memberships] = await Promise.all([
+    exportEmails(env, user.id),
+    exportMachines(env, user.id),
+    exportDailyMachineUsage(env, user.id),
+    exportDailyMachineSourceUsage(env, user.id),
+    exportOpenRouterUsage(env, account.id),
+    exportOpenRouterModelUsage(env, account.id),
+    exportOpenRouterConnections(env, user.id, account.id),
+    exportMemberships(env, user.id),
+  ]);
+  return {
+    generated_at: new Date().toISOString(),
+    account: {
+      account_number: account.account_number,
+      handle: account.handle || null,
+      kind: account.kind,
+      display_name: account.display_name,
+      bio: account.bio,
+      website_url: account.website_url,
+      github_url: account.github_url,
+      x_url: account.x_url,
+      show_model_breakdown: Boolean(account.show_model_breakdown),
+      monthly_goal_tokens: account.monthly_goal_tokens === null || account.monthly_goal_tokens === undefined ? null : int(account.monthly_goal_tokens),
+      created_at: account.created_at,
+    },
+    emails,
+    machines,
+    daily_machine_usage: dailyUsage,
+    daily_machine_source_usage: dailySourceUsage,
+    openrouter_daily_usage: orUsage,
+    openrouter_daily_model_usage: orModelUsage,
+    openrouter_connections: orConnections,
+    org_memberships: memberships,
+  };
+}
+
+async function meExportRoute(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const data = await buildUserExport(env, user);
+  const ref = String((data.account.handle || data.account.account_number) || "burnfolio").replace(/[^a-zA-Z0-9_-]/g, "") || "burnfolio";
+  return new Response(JSON.stringify(data, null, 2), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": `attachment; filename="burnfolio-${ref}-export.json"`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+// --- Account deletion ------------------------------------------------------
+// No FK-cascade reliance: every referencing table is deleted explicitly, in
+// dependency order, inside one atomic batch.
+
+async function deleteAccountRoute(request, env) {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const account = await accountView(env, user.id);
+  if (!account) return json({ error: "unauthorized" }, 401);
+
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    body = {};
+  }
+  const confirm = String(body.confirm || "").trim().toLowerCase();
+  const expectedHandle = account.handle ? String(account.handle).toLowerCase() : null;
+  const expectedNumber = String(account.account_number || "").toLowerCase();
+  if (!confirm || (confirm !== expectedHandle && confirm !== expectedNumber)) {
+    return json({ error: "confirm_mismatch" }, 400);
+  }
+
+  const ownsOrg = await env.DB.prepare("SELECT 1 FROM memberships WHERE user_id = ? AND role = 'owner' LIMIT 1").bind(user.id).first();
+  if (ownsOrg) return json({ error: "owns_orgs" }, 409);
+
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM magic_links WHERE user_id = ? OR email IN (SELECT email FROM user_emails WHERE user_id = ?)").bind(user.id, user.id),
+    env.DB.prepare("DELETE FROM user_emails WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM daily_machine_source_usage WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM daily_machine_usage WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM machines WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM openrouter_daily_model_usage WHERE account_id = ?").bind(account.id),
+    env.DB.prepare("DELETE FROM openrouter_daily_usage WHERE account_id = ?").bind(account.id),
+    env.DB.prepare("DELETE FROM openrouter_connections WHERE owner_user_id = ? OR account_id = ?").bind(user.id, account.id),
+    env.DB.prepare("DELETE FROM memberships WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM handles WHERE account_id = ?").bind(account.id),
+    env.DB.prepare("DELETE FROM users WHERE id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM accounts WHERE id = ?").bind(account.id),
+  ]);
+
+  return json({ ok: true }, 200, { "Set-Cookie": expiredCookie() });
+}
+
 function csvFilename(account, suffix) {
   const ref = String((account && (account.handle || account.account_number)) || "burnfolio").replace(/[^a-zA-Z0-9_-]/g, "") || "burnfolio";
   return `burnfolio-${ref}-${suffix}.csv`;
@@ -471,6 +645,35 @@ async function readGlobalStats(env) {
 
 function emptyGlobalStats() {
   return { days: [], total_tokens: 0, last_year_tokens: 0 };
+}
+
+// Anonymized: only a token total and a timestamp, never account/machine/handle.
+async function recentSyncs(env) {
+  const clamp = dailyTokenClamp(env);
+  const rows = await env.DB.prepare(`
+    SELECT MIN(total_tokens, ?) AS total_tokens, updated_at
+    FROM daily_machine_usage
+    WHERE total_tokens > 0
+    ORDER BY updated_at DESC
+    LIMIT 5
+  `).bind(clamp).all();
+  return (rows.results || []).map((r) => ({ total_tokens: int(r.total_tokens), tokens_display: formatCompact(int(r.total_tokens)), updated_at: r.updated_at }));
+}
+
+async function cachedRecentSyncs(env) {
+  const cacheKey = new Request("https://cache.internal/global/recent");
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached.json();
+  const rows = await recentSyncs(env);
+  const response = json(rows, 200, { "Cache-Control": "public, max-age=60" });
+  await cache.put(cacheKey, response.clone());
+  return rows;
+}
+
+async function recentSyncsRoute(request, env) {
+  const rows = await cachedRecentSyncs(env);
+  return json(rows, 200, { "Cache-Control": "public, max-age=60", "Access-Control-Allow-Origin": "*" });
 }
 
 async function platformStats(env) {
@@ -1346,7 +1549,15 @@ async function profilePage(request, env, ref) {
   const isSignedIn = await signedIn(request, env);
   if (!profile) return html(notFoundPage(isSignedIn), 404);
   profile.economics = await profileEconomics(env, profile.account);
+  profile.percentile = await accountPercentile(env, profile.account.id);
   return html(profileHtml(profile, isSignedIn));
+}
+
+async function comparePage(request, env, refA, refB) {
+  const isSignedIn = await signedIn(request, env);
+  const [a, b] = await Promise.all([buildProfile(env, refA), buildProfile(env, refB)]);
+  if (!a || !b || a.account.id === b.account.id) return html(notFoundPage(isSignedIn), 404);
+  return html(compareHtml(a, b, isSignedIn));
 }
 
 async function leaderboardRoute(request, env) {
@@ -1643,7 +1854,10 @@ function cleanLeaderboardRange(value) {
   return value === "7d" ? "7d" : "all";
 }
 
-async function fetchLeaderboard(env, range) {
+// The full ranked-by-clamped-total account list (all accounts with nonzero
+// usage, no LIMIT), shared by the leaderboard (top LEADERBOARD_LIMIT) and
+// percentile computation (an account's position among all of them).
+async function rankedAccountRows(env, range) {
   const clamp = dailyTokenClamp(env);
   const since = range === "7d" ? dateOffsetUTC(todayUTCDate().toISOString().slice(0, 10), -6) : MIN_INGEST_DATE;
   const rows = await env.DB.prepare(`
@@ -1714,11 +1928,25 @@ async function fetchLeaderboard(env, range) {
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE r.total_tokens > 0
     ORDER BY r.total_tokens DESC
-    LIMIT ?
-  `).bind(clamp, since, clamp, since, clamp, since, since, since, clamp, LEADERBOARD_LIMIT).all();
+  `).bind(clamp, since, clamp, since, clamp, since, since, since, clamp).all();
+  return rows.results || [];
+}
 
+async function cachedRankedAccountRows(env, range) {
+  const cacheKey = new Request(`https://cache.internal/ranked-totals/${range}`);
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached.json();
+  const rows = await rankedAccountRows(env, range);
+  const response = json(rows, 200, { "Cache-Control": "public, max-age=300" });
+  await cache.put(cacheKey, response.clone());
+  return rows;
+}
+
+async function fetchLeaderboard(env, range) {
+  const ranked = await cachedRankedAccountRows(env, range);
   const entries = [];
-  for (const [index, row] of (rows.results || []).entries()) {
+  for (const [index, row] of ranked.slice(0, LEADERBOARD_LIMIT).entries()) {
     const days = row.kind === "org" ? await orgDays(env, row.account_id) : await userDays(env, row.account_id);
     const stats = profileStats(days, int(row.total_tokens));
     entries.push({
@@ -1741,13 +1969,24 @@ async function cachedLeaderboard(env, range) {
   if (cached) return cached.json();
   const entries = await fetchLeaderboard(env, range);
   const payload = { range, generated_at: new Date().toISOString(), entries };
-  const response = json(payload, 200, { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" });
+  const response = json(payload, 200, { "Cache-Control": "public, max-age=300" });
   await cache.put(cacheKey, response.clone());
   return payload;
 }
 
+const PERCENTILE_MIN_ACCOUNTS = 20;
+
+async function accountPercentile(env, accountID) {
+  const ranked = await cachedRankedAccountRows(env, "all");
+  if (ranked.length < PERCENTILE_MIN_ACCOUNTS) return null;
+  const index = ranked.findIndex((row) => row.account_id === accountID);
+  if (index === -1) return null;
+  const percentile = Math.max(1, Math.round(((index + 1) / ranked.length) * 100));
+  return { percentile, totalAccounts: ranked.length };
+}
+
 async function updateAccountMetadata(env, accountID, fields) {
-  const columns = ["bio", "website_url", "github_url", "x_url", "show_model_breakdown"].filter((key) => key in fields);
+  const columns = ["bio", "website_url", "github_url", "x_url", "show_model_breakdown", "monthly_goal_tokens"].filter((key) => key in fields);
   if (!columns.length) return;
   const assignments = columns.map((key) => `${key} = ?`).join(", ");
   const values = columns.map((key) => (key === "show_model_breakdown" ? (fields[key] ? 1 : 0) : fields[key] || null));
@@ -1933,7 +2172,7 @@ function machineCanSyncToAccount(machine, account) {
 
 async function accountView(env, id) {
   return env.DB.prepare(`
-    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.show_model_breakdown, a.created_at, h.handle
+    SELECT a.id, a.account_number, a.kind, a.display_name, a.bio, a.website_url, a.github_url, a.x_url, a.show_model_breakdown, a.monthly_goal_tokens, a.created_at, h.handle
     FROM accounts a
     LEFT JOIN handles h ON h.account_id = a.id
     WHERE a.id = ?
@@ -1979,7 +2218,7 @@ async function uniqueAccountNumber(env) {
   throw new Error("account_number_exhausted");
 }
 
-function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { users: 0, orgs: 0 }) {
+function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { users: 0, orgs: 0 }, recent = []) {
   const globalTotal = formatCompact(global.total_tokens);
   const globalSubtitle = `${formatInt(global.last_year_tokens)} tokens burned globally`;
   const showSocialProof = counts.users >= 50;
@@ -2008,6 +2247,7 @@ function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { us
             </div>` : ""}
           </div>
           ${heatmap(global.days, { title: "Past year", subtitle: globalSubtitle })}
+          ${recentSyncsTicker(recent)}
           ${landingSteps()}
         </section>
       </section>
@@ -2019,6 +2259,17 @@ function homePage(isSignedIn = false, global = emptyGlobalStats(), counts = { us
     canonical: "https://burnfolio.ai/",
     signedIn: isSignedIn,
   });
+}
+
+function recentSyncsTicker(recent) {
+  return `<div class="recent-ticker" data-recent-ticker${!recent || !recent.length ? " hidden" : ""}>
+    <p class="eyebrow">Recent syncs</p>
+    <ul>${recentSyncsItems(recent)}</ul>
+  </div>`;
+}
+
+function recentSyncsItems(recent) {
+  return (recent || []).map((r) => `<li><strong>${esc(r.tokens_display)}</strong> tokens synced <span data-since="${esc(r.updated_at)}">recently</span></li>`).join("");
 }
 
 function landingSteps() {
@@ -2124,7 +2375,7 @@ async function appPage(request, env) {
   const emailSummary = emails.length
     ? ` · ${esc(emails[0].email)}${emails[0].verified_at ? " verified" : " pending"}`
     : "";
-  const history = await historyPanel(env, user.id);
+  const history = await historyPanel(env, account);
   return layout("Burnfolio dashboard", `
     <main class="dash">
       <header class="dash-head">
@@ -2161,9 +2412,26 @@ async function appPage(request, env) {
         </section>
       </div>
       ${history}
+      ${dangerZone(account)}
     </main>
     <script>${dashboardScript(profileRef)}</script>
   `, { signedIn: true });
+}
+
+function dangerZone(account) {
+  const name = esc(account.handle || account.account_number);
+  return `<section class="panel danger-zone">
+    <div class="section-head"><div><h2>Danger zone</h2><p class="muted">Export everything Burnfolio has stored about you, or permanently delete your account.</p></div></div>
+    <div class="danger-actions">
+      <a class="button secondary" href="/api/me/export.json">Export your data (JSON)</a>
+    </div>
+    <form class="form-row" data-delete-account>
+      <label class="sr-only" for="delete-confirm">Type your username to confirm</label>
+      <input id="delete-confirm" name="confirm" placeholder="Type &quot;${name}&quot; to confirm" autocomplete="off">
+      <button type="submit" class="danger">Delete account</button>
+    </form>
+    <p class="result" data-delete-result hidden></p>
+  </section>`;
 }
 
 async function orgsPage(request, env) {
@@ -2354,6 +2622,7 @@ function profileHtml(profile, isSignedIn = false) {
         </div>
         <div class="actions"><button class="share-button" type="button" data-share-open data-share-image="${esc(shareImagePath)}" data-share-text="${esc(shareText)}">Share</button><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
       </header>
+      <p class="compare-hint"><button type="button" class="link-button" data-compare="${esc(name)}">Compare with another profile</button></p>
       ${profileAbout(profile.account)}
       <section class="stats">
         ${statCard("Total burn", formatCompact(profile.total_tokens), `${formatInt(profile.total_tokens)} exact`)}
@@ -2363,8 +2632,9 @@ function profileHtml(profile, isSignedIn = false) {
         ${statCard("Current streak", formatInt(stats.current_streak_days))}
         ${statCard("Longest streak", formatInt(stats.longest_streak_days))}
         ${statCard("Daily average", formatCompact(stats.average_active_day_tokens), "on active days")}
+        ${profile.percentile ? statCard("Percentile", `Top ${profile.percentile.percentile}%`, "by total tokens", "Among all Burnfolio profiles by total tokens.") : ""}
       </section>
-      ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned` })}
+      ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned`, eras: true })}
       ${heatmapYears(profile.days).length > 1 ? heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" }) : ""}
       ${sourceBreakdownSection(profile.economics)}
       <details class="embed-disclosure">
@@ -2378,6 +2648,85 @@ function profileHtml(profile, isSignedIn = false) {
     image: shareImageURL,
     imageType: "image/png",
     canonical: profileURL,
+    siteName: "Burnfolio",
+    signedIn: isSignedIn,
+  });
+}
+
+function compareDisplayName(account) {
+  if (account.handle) return account.handle;
+  if (account.display_name && account.display_name !== "Anonymous builder" && account.display_name !== account.account_number) return account.display_name;
+  return account.account_number;
+}
+
+function formatRatio(value) {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 100) return Math.round(value).toString();
+  return value.toFixed(1);
+}
+
+function compareRatioLine(a, b, nameA, nameB) {
+  const totalA = a.total_tokens;
+  const totalB = b.total_tokens;
+  if (totalA === 0 && totalB === 0) return `Neither ${nameA} nor ${nameB} has burned any tokens yet.`;
+  if (totalA === 0 || totalB === 0) {
+    const [zeroName, activeName] = totalA === 0 ? [nameA, nameB] : [nameB, nameA];
+    return `${activeName} has burned tokens; ${zeroName} hasn't started yet.`;
+  }
+  const higherFirst = totalA >= totalB;
+  const higherTotal = higherFirst ? totalA : totalB;
+  const higherName = higherFirst ? nameA : nameB;
+  const lowerTotal = higherFirst ? totalB : totalA;
+  const lowerName = higherFirst ? nameB : nameA;
+  if (higherTotal === lowerTotal) return `${nameA} and ${nameB} have burned the same amount.`;
+  return `${higherName} has burned ${formatRatio(higherTotal / lowerTotal)}× ${lowerName}'s tokens.`;
+}
+
+function compareColumn(profile) {
+  const account = profile.account;
+  const ref = accountRef(account);
+  const displayName = compareDisplayName(account);
+  const stats = profile.stats;
+  return `<div class="compare-column">
+    <h2><a href="/${esc(ref)}">${esc(displayName)}</a></h2>
+    <section class="stats compact-stats">
+      ${statCard("Total burn", formatCompact(profile.total_tokens))}
+      ${statCard("Active days", formatInt(stats.active_days))}
+      ${statCard("Best day", formatCompact(stats.best_day_tokens))}
+      ${statCard("Current streak", formatInt(stats.current_streak_days))}
+      ${statCard("Longest streak", formatInt(stats.longest_streak_days))}
+    </section>
+    ${heatmap(profile.days, { compact: true, learn: false, subtitle: "Past year" })}
+  </div>`;
+}
+
+function compareHtml(a, b, isSignedIn = false) {
+  const rawNameA = compareDisplayName(a.account);
+  const rawNameB = compareDisplayName(b.account);
+  const nameA = esc(rawNameA);
+  const nameB = esc(rawNameB);
+  const refA = accountRef(a.account);
+  const refB = accountRef(b.account);
+  const ratioLine = compareRatioLine(a, b, nameA, nameB);
+  const title = `${rawNameA} vs ${rawNameB} on Burnfolio`;
+  const description = `${rawNameA} has burned ${formatInt(a.total_tokens)} tokens. ${rawNameB} has burned ${formatInt(b.total_tokens)} tokens.`;
+  return layout(title, `
+    <main class="profile compare-page">
+      <header class="profile-head">
+        <div>
+          <p class="eyebrow">Compare</p>
+          <h1>${nameA} vs ${nameB}</h1>
+          <p class="profile-summary"><span>${ratioLine}</span></p>
+        </div>
+      </header>
+      <div class="compare-grid">
+        ${compareColumn(a)}
+        ${compareColumn(b)}
+      </div>
+    </main>
+  `, {
+    description,
+    canonical: `https://burnfolio.ai/vs/${encodeURIComponent(refA)}/${encodeURIComponent(refB)}`,
     siteName: "Burnfolio",
     signedIn: isSignedIn,
   });
@@ -2403,9 +2752,10 @@ function profileLinks(account) {
 function shareCopy(profile, displayName) {
   const stats = profile.stats;
   const best = stats.best_day ? ` Best day: ${formatCompact(stats.best_day_tokens)} tokens.` : "";
+  const percentile = profile.percentile ? ` Top ${profile.percentile.percentile}% of burners.` : "";
   const equivalence = shareEquivalence(profile.total_tokens);
   const equivalenceLine = equivalence ? ` ${equivalence}.` : "";
-  return `${displayName} burned ${formatInt(profile.total_tokens)} AI tokens across ${formatInt(stats.active_days)} active days.${best}${equivalenceLine} Show your burn.`;
+  return `${displayName} burned ${formatInt(profile.total_tokens)} AI tokens across ${formatInt(stats.active_days)} active days.${best}${percentile}${equivalenceLine} Show your burn.`;
 }
 
 function shareDialog(imageURL, text) {
@@ -2907,7 +3257,7 @@ function privacyPage(isSignedIn = false) {
         </article>
         <article class="learn-card">
           <h2>Data deletion</h2>
-          <p>We don't have self-serve account deletion yet. Open an issue on <a href="https://github.com/nbitslabs/burnfolio" rel="noopener noreferrer" target="_blank">GitHub</a> and we'll delete your account and usage data.</p>
+          <p>Account deletion is self-serve: open the Danger zone at the bottom of your <a href="/app">dashboard</a> to export your data or permanently delete your account and all associated usage data.</p>
         </article>
       </section>
     </main>
@@ -2965,15 +3315,45 @@ function siteFooter() {
   </footer>`;
 }
 
+// Editorial markers, approximate dates — subtle annotations only, not authoritative release history.
+const MODEL_ERAS = [
+  { date: "2025-05-22", label: "Claude 4" },
+  { date: "2025-08-07", label: "GPT-5" },
+  { date: "2025-09-29", label: "Sonnet 4.5" },
+  { date: "2025-11-24", label: "Opus 4.5" },
+  { date: "2026-02-01", label: "Gemini 3.5" },
+  { date: "2026-04-01", label: "Opus 4.8" },
+  { date: "2026-06-01", label: "Fable 5" },
+];
+
+function eraMarksHTML(data) {
+  const dated = data.filter((c) => c.date);
+  if (!dated.length) return "";
+  const start = dated[0].date;
+  const end = dated[dated.length - 1].date;
+  const marks = [];
+  for (const era of MODEL_ERAS) {
+    if (era.date < start || era.date > end) continue;
+    let index = data.findIndex((c) => c.date === era.date);
+    if (index === -1) index = data.findIndex((c) => c.date && c.date >= era.date);
+    if (index === -1) continue;
+    const column = Math.floor(index / 7) + 1;
+    const tip = `${era.label} released ${formatDate(era.date)}`;
+    marks.push(`<span class="era-mark" style="grid-column:${column}" data-tip="${esc(tip)}" title="${esc(tip)}" tabindex="0" role="img" aria-label="${esc(tip)}"></span>`);
+  }
+  return marks.join("");
+}
+
 function heatmap(days, options = {}) {
   const scale = options.scale || heatmapScale(days);
   const data = heatmapCellData(days, scale);
   const cells = data.map((cell) => heatmapCell(cell));
   const classes = ["graph", options.compact ? "compact" : "", options.fit ? "fit" : ""].filter(Boolean).join(" ");
   const learn = options.learn === false ? "" : graphLearnLink();
+  const eraMarks = options.eras ? eraMarksHTML(data) : "";
   return `<section class="${classes}">
     ${options.title ? `<div class="graph-head"><div><h2>${esc(options.title)}</h2>${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}</div>${legend()}</div>` : `<div class="graph-head small">${options.subtitle ? `<p>${esc(options.subtitle)}</p>` : ""}${legend()}</div>`}
-    <div class="heatmap-scroll">${heatmapFrame(data, cells.join(""), "Token burn by day")}</div>
+    <div class="heatmap-scroll">${heatmapFrame(data, cells.join(""), "Token burn by day", "", eraMarks)}</div>
     ${learn}
   </section>`;
 }
@@ -3050,11 +3430,12 @@ function heatmapCell(cell) {
   return `<span title="${esc(tip)}" data-tip="${esc(tip)}" class="cell l${cell.level}" role="img" aria-label="${esc(tip)}"></span>`;
 }
 
-function heatmapFrame(data, cells, label, extraClass = "") {
+function heatmapFrame(data, cells, label, extraClass = "", eraMarks = "") {
   const months = monthLabels(data);
-  const frameClass = ["heatmap-frame", extraClass ? `${extraClass}-frame` : ""].filter(Boolean).join(" ");
+  const frameClass = ["heatmap-frame", extraClass ? `${extraClass}-frame` : "", eraMarks ? "has-eras" : ""].filter(Boolean).join(" ");
   return `<div class="${frameClass}">
     <div class="month-labels" aria-hidden="true">${months.map((month) => `<span style="grid-column:${month.column}">${esc(month.label)}</span>`).join("")}</div>
+    ${eraMarks ? `<div class="era-markers">${eraMarks}</div>` : ""}
     <div class="weekday-labels" aria-hidden="true"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>
     <div class="heatmap ${extraClass}" aria-label="${esc(label)}">${cells}</div>
   </div>`;
@@ -3134,14 +3515,40 @@ function sourceBreakdownSection(economics) {
 const HISTORY_CHART_DAYS = 90;
 const HISTORY_TABLE_DAYS = 30;
 
-async function historyPanel(env, userID) {
-  const [componentRows, sourceRows] = await Promise.all([
+function goalPanel(account, monthDays) {
+  const goal = int(account.monthly_goal_tokens);
+  const hasGoal = goal > 0;
+  const monthStart = `${todayUTCDate().toISOString().slice(0, 7)}-01`;
+  const monthToDate = (monthDays || []).filter((d) => d.date_utc >= monthStart).reduce((sum, d) => sum + int(d.total_tokens), 0);
+  const pct = hasGoal ? Math.round((monthToDate / goal) * 100) : 0;
+  const barPct = Math.min(100, pct);
+  const met = hasGoal && pct >= 100;
+  return `<div class="goal-panel">
+    <h3>Monthly goal</h3>
+    <form class="form-row" data-goal>
+      <label class="sr-only" for="goal-tokens">Monthly token goal</label>
+      <input id="goal-tokens" name="monthly_goal_tokens" type="number" min="0" step="1" placeholder="e.g. 5000000" value="${hasGoal ? goal : ""}">
+      <button type="submit" class="secondary">Save goal</button>
+    </form>
+    ${hasGoal ? `<div class="goal-progress">
+      <div class="goal-progress-track"><div class="goal-progress-fill${met ? " met" : ""}" style="width:${barPct}%"></div></div>
+      <p class="muted">${formatCompact(monthToDate)} / ${formatCompact(goal)} tokens this month (${pct}%)${met ? " — Goal met \u{1F525}" : ""}</p>
+    </div>` : `<p class="muted">Set a monthly token goal to track progress here. This is private and never shown on your public profile.</p>`}
+  </div>`;
+}
+
+async function historyPanel(env, account) {
+  const userID = account.id;
+  const [componentRows, sourceRows, monthDays] = await Promise.all([
     userDailyComponentRows(env, userID),
     userDailySourceRows(env, userID),
+    userDays(env, userID),
   ]);
+  const goal = goalPanel(account, monthDays);
   if (!componentRows.length) {
     return `<section class="panel history-panel">
       <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show recent activity.</p></div></div>
+      ${goal}
       ${emptyState("No usage yet", "Sync with pyro or connect OpenRouter to start filling in your history.")}
     </section>`;
   }
@@ -3178,6 +3585,7 @@ async function historyPanel(env, userID) {
 
   return `<section class="panel history-panel">
     <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show the last ${HISTORY_CHART_DAYS} days.</p></div></div>
+    ${goal}
     <div class="history-chart-wrap">${historyBarChartSVG(last90)}</div>
     ${historyToolSplit(toolTotals90)}
     <div class="history-actions">
@@ -3651,7 +4059,10 @@ function dashboardScript(profileRef) {
         member_not_found: "That member was not found.",
         member_must_accept_invite: "That user has to accept the org invite before ownership can be transferred.",
         invite_not_found: "That invite is no longer available.",
-        user_not_found: "No user was found for that account or username."
+        user_not_found: "No user was found for that account or username.",
+        invalid_goal: "Enter a whole number of tokens, 0 or blank to clear.",
+        confirm_mismatch: "That doesn't match your username or account number.",
+        owns_orgs: "Transfer ownership of your organizations before deleting your account."
       };
       return messages[data && data.error] || "Something went wrong. Check the inputs and try again.";
     }
@@ -3794,6 +4205,23 @@ function dashboardScript(profileRef) {
         restoreButton(button);
       }
     });
+    document.querySelector("[data-goal]")?.addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const button = submitButton(form);
+      setBusy(button, "Saving...");
+      try {
+        const { ok, data } = await patch(form, "/api/profile");
+        if (ok) location.reload();
+        else {
+          alert(messageFor(data));
+          restoreButton(button);
+        }
+      } catch {
+        alert("Something went wrong. Try again.");
+        restoreButton(button);
+      }
+    });
     document.querySelectorAll("[data-openrouter]").forEach(panel => {
       const result = panel.querySelector("[data-openrouter-result]");
       const connect = panel.querySelector("[data-openrouter-connect]");
@@ -3895,6 +4323,32 @@ function dashboardScript(profileRef) {
       setBusy(button, "Logging out...");
       await fetch("/api/logout", { method:"POST" });
       location.href = "/";
+    });
+    document.querySelector("[data-delete-account]")?.addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const button = submitButton(form);
+      const out = form.querySelector("[data-delete-result]") || document.querySelector("[data-delete-result]");
+      const confirmValue = new FormData(form).get("confirm") || "";
+      if (!confirmValue.trim()) {
+        if (out) { out.hidden = false; out.textContent = "Type your username to confirm."; }
+        return;
+      }
+      if (!confirm("This permanently deletes your account and all its data. This cannot be undone. Continue?")) return;
+      setBusy(button, "Deleting...");
+      try {
+        const res = await fetch("/api/me", { method:"DELETE", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ confirm: confirmValue }) });
+        const data = await res.json();
+        if (res.ok) {
+          location.href = "/";
+          return;
+        }
+        if (out) { out.hidden = false; out.textContent = messageFor(data); }
+        restoreButton(button);
+      } catch {
+        if (out) { out.hidden = false; out.textContent = "Something went wrong. Try again."; }
+        restoreButton(button);
+      }
     });
     document.querySelectorAll("[data-invite-accept]").forEach(button => button.addEventListener("click", async () => {
       setBusy(button, "Accepting...");
@@ -4110,6 +4564,61 @@ function globalScript() {
       });
     }
     requestAnimationFrame(() => scrollHeatmapsToNow());
+    document.querySelectorAll("[data-compare]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const other = prompt("Compare with which profile? Enter a username or account number.");
+        if (!other || !other.trim()) return;
+        location.href = "/vs/" + encodeURIComponent(button.dataset.compare) + "/" + encodeURIComponent(other.trim().replace(/^@/, ""));
+      });
+    });
+    (function recentTicker() {
+      const root = document.querySelector("[data-recent-ticker]");
+      if (!root) return;
+      const list = root.querySelector("ul");
+      function relativeTime(iso) {
+        const sec = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+        if (sec < 60) return "just now";
+        const min = Math.round(sec / 60);
+        if (min < 60) return min + (min === 1 ? " minute ago" : " minutes ago");
+        const hr = Math.round(min / 60);
+        if (hr < 24) return hr + (hr === 1 ? " hour ago" : " hours ago");
+        const day = Math.round(hr / 24);
+        return day + (day === 1 ? " day ago" : " days ago");
+      }
+      function refreshTimes() {
+        list.querySelectorAll("[data-since]").forEach((el) => {
+          el.textContent = relativeTime(el.dataset.since);
+        });
+      }
+      function renderRows(rows) {
+        if (!rows || !rows.length) {
+          root.hidden = true;
+          return;
+        }
+        root.hidden = false;
+        list.textContent = "";
+        rows.forEach((r) => {
+          const li = document.createElement("li");
+          const strong = document.createElement("strong");
+          strong.textContent = r.tokens_display;
+          const since = document.createElement("span");
+          since.dataset.since = r.updated_at;
+          since.textContent = "recently";
+          li.append(strong, document.createTextNode(" tokens synced "), since);
+          list.appendChild(li);
+        });
+        refreshTimes();
+      }
+      refreshTimes();
+      setInterval(refreshTimes, 30000);
+      setInterval(async () => {
+        try {
+          const res = await fetch("/api/global/recent");
+          if (!res.ok) return;
+          renderRows(await res.json());
+        } catch {}
+      }, 60000);
+    })();
     function shareStatus(message) {
       const out = document.querySelector("[data-share-result]");
       if (!out) return;
@@ -4472,6 +4981,16 @@ function cleanProfileMetadata(body) {
     fields.x_url = x;
   }
   if ("show_model_breakdown" in body) fields.show_model_breakdown = body.show_model_breakdown === true || body.show_model_breakdown === "true";
+  if ("monthly_goal_tokens" in body) {
+    const raw = body.monthly_goal_tokens;
+    if (raw === null || raw === "") {
+      fields.monthly_goal_tokens = null;
+    } else {
+      const value = boundedInt(raw, MAX_TOKEN_FIELD);
+      if (value === null) return { error: "invalid_goal" };
+      fields.monthly_goal_tokens = value > 0 ? value : null;
+    }
+  }
   return fields;
 }
 
