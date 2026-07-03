@@ -1484,7 +1484,7 @@ function summarizeSourceRows(rows) {
   const topModels = [...byModelMap.entries()]
     .map(([model, tokens]) => ({ model, tokens, pct: total ? tokens / total : 0 }))
     .sort((a, b) => b.tokens - a.tokens)
-    .slice(0, 5);
+    .slice(0, 10);
   return { total, byTool, topModels };
 }
 
