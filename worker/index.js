@@ -24,6 +24,7 @@ const RESERVED_HANDLES = new Set([
   "how_we_count",
   "howwecount",
   "leaderboard",
+  "badges",
   "vs",
   "install",
   "uninstall",
@@ -83,8 +84,8 @@ async function route(request, env) {
   if (path === "/how-we-count") return html(howWeCountPage(await signedIn(request, env)));
   if (path === "/privacy") return html(privacyPage(await signedIn(request, env)));
   if (path === "/leaderboard") return leaderboardPage(request, env);
+  if (path === "/badges") return badgesPage(request, env);
   if (path === "/api/leaderboard" && (request.method === "GET" || request.method === "HEAD")) return leaderboardRoute(request, env);
-  if (path.match(/^\/vs\/[^/]+\/[^/]+$/)) return comparePage(request, env, decodeURIComponent(path.split("/")[2]), decodeURIComponent(path.split("/")[3]));
   if (path === "/app") return html(await appPage(request, env));
   if (path === "/app/orgs") return html(await orgsPage(request, env));
   if (path === "/api/signup" && request.method === "POST") return signup(request, env);
@@ -1524,6 +1525,254 @@ function publicOpenRouterConnection(connection, sync = {}) {
   };
 }
 
+// --- Badges ----------------------------------------------------------------
+// Computed on read from existing usage data — no new tables. Rarity tiers use
+// AI-flavored names but the underlying `tier` key stays common/uncommon/rare
+// so sorting and styling don't depend on the display copy.
+
+const BADGE_TIERS = { common: "Base Model", uncommon: "Fine-Tune", rare: "Frontier" };
+const BADGE_TIER_ORDER = ["rare", "uncommon", "common"];
+
+const BADGE_DEFS = [
+  { key: "hello_world", name: "Hello, World", tier: "common", description: "Every run starts with a single token.", check: (s) => s.lifetimeTokens > 0 },
+  { key: "warm_cache", name: "Warm Cache", tier: "common", description: "One hundred million tokens. The KV cache remembers you now.", check: (s) => s.lifetimeTokens >= 100_000_000 },
+  { key: "training_loop", name: "Training Loop", tier: "common", description: "Seven consecutive days. The loss curve is trending down.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 7 },
+  { key: "multi_agent", name: "Multi-Agent", tier: "common", description: "Three agents, one human in the loop. Allegedly.", check: (s) => s.distinctTools >= 3 },
+  { key: "model_collector", name: "Model Collector", tier: "common", description: "Gotta prompt 'em all.", check: (s) => s.distinctModels >= 5 },
+  { key: "always_on", name: "Always On", tier: "common", description: "Uptime rivaling the API you call.", check: (s) => s.activeDays >= 30 },
+
+  { key: "billion_token_brain", name: "Billion-Token Brain", tier: "uncommon", description: "Enough tokens to pretrain a very small, very confused model.", check: (s) => s.lifetimeTokens >= 1_000_000_000 },
+  { key: "epoch", name: "Epoch", tier: "uncommon", description: "One full pass over the month. No early stopping.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 30 },
+  { key: "overclocked", name: "Overclocked", tier: "uncommon", description: "Your fans are audible from space.", check: (s) => s.bestDayTokens >= 100_000_000 },
+  { key: "orchestrator", name: "Orchestrator", tier: "uncommon", description: "You don't write code anymore. You conduct it.", check: (s) => s.distinctTools >= 5 },
+  { key: "ensemble", name: "Ensemble", tier: "uncommon", description: "Ten models polled. Consensus pending.", check: (s) => s.distinctModels >= 10 },
+  { key: "cache_whisperer", name: "Cache Whisperer", tier: "uncommon", description: "Half your context came straight from cache. The bill thanks you.", check: (s) => s.cacheReadTokens >= 10_000_000 && s.cacheReadTokens >= 0.5 * (s.inputTokens + s.cacheReadTokens) },
+
+  { key: "pretraining_run", name: "Pretraining Run", tier: "rare", description: "That's not usage. That's a dataset.", check: (s) => s.lifetimeTokens >= 10_000_000_000 },
+  { key: "foundation_model", name: "Foundation Model", tier: "rare", description: "Please disclose your training data.", check: (s) => s.lifetimeTokens >= 100_000_000_000 },
+  { key: "convergence", name: "Convergence", tier: "rare", description: "One hundred days in the loop. Gradient fully descended.", check: (s) => Math.max(s.currentStreak, s.longestStreak) >= 100 },
+  { key: "datacenter_cosplay", name: "Datacenter Cosplay", tier: "rare", description: "Somewhere, a cluster spun up just for you.", check: (s) => s.bestDayTokens >= 1_000_000_000 },
+  { key: "mixture_of_experts", name: "Mixture of Experts", tier: "rare", description: "You are the gating network.", check: (s) => s.distinctModels >= 25 },
+  {
+    key: "deep_thought",
+    name: "Deep Thought",
+    tier: "rare",
+    secret: true,
+    description: "42. The answer to burn, the universe, and everything.",
+    secretName: "???",
+    secretDescription: "Some questions answer themselves.",
+    check: (s) => s.activeDays === 42 || s.currentStreak === 42 || s.longestStreak === 42,
+  },
+];
+
+function badgeDef(key) {
+  return BADGE_DEFS.find((b) => b.key === key) || null;
+}
+
+function badgeTooltip(def) {
+  return `${BADGE_TIERS[def.tier]} · ${def.name} badge`;
+}
+
+function computeBadges(statsBundle) {
+  return BADGE_DEFS.filter((b) => b.check(statsBundle)).map((b) => b.key);
+}
+
+// Nearest-progress fraction toward an unearned badge, for the dashboard goals panel.
+function badgeProgress(def, statsBundle) {
+  const s = statsBundle;
+  switch (def.key) {
+    case "warm_cache": return s.lifetimeTokens / 100_000_000;
+    case "training_loop": return Math.max(s.currentStreak, s.longestStreak) / 7;
+    case "multi_agent": return s.distinctTools / 3;
+    case "model_collector": return s.distinctModels / 5;
+    case "always_on": return s.activeDays / 30;
+    case "billion_token_brain": return s.lifetimeTokens / 1_000_000_000;
+    case "epoch": return Math.max(s.currentStreak, s.longestStreak) / 30;
+    case "overclocked": return s.bestDayTokens / 100_000_000;
+    case "orchestrator": return s.distinctTools / 5;
+    case "ensemble": return s.distinctModels / 10;
+    case "cache_whisperer": return Math.min(s.cacheReadTokens / 10_000_000, (s.cacheReadTokens || 0) / Math.max(0.5 * (s.inputTokens + s.cacheReadTokens), 1));
+    case "pretraining_run": return s.lifetimeTokens / 10_000_000_000;
+    case "foundation_model": return s.lifetimeTokens / 100_000_000_000;
+    case "convergence": return Math.max(s.currentStreak, s.longestStreak) / 100;
+    case "datacenter_cosplay": return s.bestDayTokens / 1_000_000_000;
+    case "mixture_of_experts": return s.distinctModels / 25;
+    default: return 0;
+  }
+}
+
+// The one extra query per profile view: distinct tool/model counts and
+// lifetime input/cache-read sums, scoped like the existing breakdown queries
+// (userSourceRows/orgSourceRows) but unbounded by date (badges are lifetime).
+async function badgeComponentTotals(env, account) {
+  if (account.kind === "org") {
+    const row = await env.DB.prepare(`
+      WITH org_or_rows AS (
+        SELECT o.input_tokens, o.cache_read_tokens
+        FROM openrouter_daily_usage o
+        LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
+        WHERE o.account_id = ? OR m.user_id IS NOT NULL
+      ),
+      org_or_model_rows AS (
+        SELECT o.model
+        FROM openrouter_daily_model_usage o
+        LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
+        WHERE o.account_id = ? OR m.user_id IS NOT NULL
+      )
+      SELECT
+        (COALESCE((SELECT SUM(d.input_tokens) FROM daily_machine_usage d JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active' WHERE m.org_id = ?), 0)
+          + COALESCE((SELECT SUM(input_tokens) FROM org_or_rows), 0)) AS input_tokens,
+        (COALESCE((SELECT SUM(d.cache_read_tokens) FROM daily_machine_usage d JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active' WHERE m.org_id = ?), 0)
+          + COALESCE((SELECT SUM(cache_read_tokens) FROM org_or_rows), 0)) AS cache_read_tokens,
+        (SELECT COUNT(DISTINCT cli) FROM (
+          SELECT s.cli AS cli FROM daily_machine_source_usage s JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active' WHERE m.org_id = ?
+          UNION ALL
+          SELECT 'openrouter' AS cli FROM org_or_model_rows
+        )) AS distinct_tools,
+        (SELECT COUNT(DISTINCT model) FROM (
+          SELECT s.model AS model FROM daily_machine_source_usage s JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active' WHERE m.org_id = ?
+          UNION ALL
+          SELECT model FROM org_or_model_rows
+        )) AS distinct_models
+    `).bind(account.id, account.id, account.id, account.id, account.id, account.id, account.id, account.id).first();
+    return {
+      inputTokens: int(row && row.input_tokens),
+      cacheReadTokens: int(row && row.cache_read_tokens),
+      distinctTools: int(row && row.distinct_tools),
+      distinctModels: int(row && row.distinct_models),
+    };
+  }
+  const row = await env.DB.prepare(`
+    SELECT
+      (COALESCE((SELECT SUM(d.input_tokens) FROM daily_machine_usage d JOIN machines mm ON mm.id = d.machine_id WHERE d.user_id = ? AND mm.org_id IS NULL), 0)
+        + COALESCE((SELECT SUM(input_tokens) FROM openrouter_daily_usage WHERE account_id = ?), 0)) AS input_tokens,
+      (COALESCE((SELECT SUM(d.cache_read_tokens) FROM daily_machine_usage d JOIN machines mm ON mm.id = d.machine_id WHERE d.user_id = ? AND mm.org_id IS NULL), 0)
+        + COALESCE((SELECT SUM(cache_read_tokens) FROM openrouter_daily_usage WHERE account_id = ?), 0)) AS cache_read_tokens,
+      (SELECT COUNT(DISTINCT cli) FROM (
+        SELECT s.cli AS cli FROM daily_machine_source_usage s JOIN machines mm ON mm.id = s.machine_id WHERE s.user_id = ? AND mm.org_id IS NULL
+        UNION ALL
+        SELECT 'openrouter' AS cli FROM openrouter_daily_model_usage WHERE account_id = ?
+      )) AS distinct_tools,
+      (SELECT COUNT(DISTINCT model) FROM (
+        SELECT s.model AS model FROM daily_machine_source_usage s JOIN machines mm ON mm.id = s.machine_id WHERE s.user_id = ? AND mm.org_id IS NULL
+        UNION ALL
+        SELECT o.model AS model FROM openrouter_daily_model_usage o WHERE o.account_id = ?
+      )) AS distinct_models
+  `).bind(account.id, account.id, account.id, account.id, account.id, account.id, account.id, account.id).first();
+  return {
+    inputTokens: int(row && row.input_tokens),
+    cacheReadTokens: int(row && row.cache_read_tokens),
+    distinctTools: int(row && row.distinct_tools),
+    distinctModels: int(row && row.distinct_models),
+  };
+}
+
+async function badgeBundleFor(env, account, stats, total) {
+  const totals = await badgeComponentTotals(env, account);
+  return {
+    lifetimeTokens: total,
+    bestDayTokens: stats.best_day_tokens,
+    activeDays: stats.active_days,
+    currentStreak: stats.current_streak_days,
+    longestStreak: stats.longest_streak_days,
+    distinctTools: totals.distinctTools,
+    distinctModels: totals.distinctModels,
+    cacheReadTokens: totals.cacheReadTokens,
+    inputTokens: totals.inputTokens,
+  };
+}
+
+async function profileBadgeStats(env, profile) {
+  const bundle = await badgeBundleFor(env, profile.account, profile.stats, profile.total_tokens);
+  return { bundle, earned: computeBadges(bundle) };
+}
+
+// The expensive sweep for /badges earned-by counts. There's no practical way
+// to replicate all 18 thresholds (especially streaks) as one SQL pass, so
+// this walks the same nonzero-usage account set the leaderboard ranks —
+// zero-usage accounts can't earn any badge (Hello, World requires >0 tokens)
+// — and is only ever called lazily, cached 15 min.
+async function badgeEarnedCounts(env) {
+  const ranked = await rankedAccountRows(env, "all");
+  const counts = Object.fromEntries(BADGE_DEFS.map((b) => [b.key, 0]));
+  for (const row of ranked) {
+    const account = { id: row.account_id, kind: row.kind };
+    const days = row.kind === "org" ? await orgDays(env, row.account_id) : await userDays(env, row.account_id);
+    const total = days.reduce((sum, d) => sum + d.total_tokens, 0);
+    const stats = profileStats(days, total);
+    const bundle = await badgeBundleFor(env, account, stats, total);
+    for (const key of computeBadges(bundle)) counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
+}
+
+async function cachedBadgeEarnedCounts(env) {
+  const cacheKey = new Request("https://cache.internal/badges/counts");
+  const cache = caches.default;
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached.json();
+  const counts = await badgeEarnedCounts(env);
+  const response = json(counts, 200, { "Cache-Control": "public, max-age=900" });
+  await cache.put(cacheKey, response.clone());
+  return counts;
+}
+
+async function badgesPage(request, env) {
+  const isSignedIn = await signedIn(request, env);
+  const user = await requireUser(request, env);
+  let earnedByViewer = new Set();
+  if (user) {
+    const account = await accountView(env, user.id);
+    const days = await userDays(env, user.id);
+    const total = days.reduce((sum, d) => sum + d.total_tokens, 0);
+    const stats = profileStats(days, total);
+    const bundle = await badgeBundleFor(env, account, stats, total);
+    earnedByViewer = new Set(computeBadges(bundle));
+  }
+  const counts = await cachedBadgeEarnedCounts(env);
+  return html(badgesPageHtml(counts, earnedByViewer, isSignedIn));
+}
+
+function badgesPageHtml(counts, earnedByViewer, isSignedIn) {
+  const groups = BADGE_TIER_ORDER.map((tier) => ({
+    tier,
+    label: BADGE_TIERS[tier],
+    defs: BADGE_DEFS.filter((b) => b.tier === tier),
+  }));
+  const sections = groups.map((group) => `<section class="badge-tier-group">
+    <h2>${esc(group.label)}</h2>
+    <div class="badge-grid">${group.defs.map((def) => badgeCard(def, counts[def.key] || 0, earnedByViewer.has(def.key))).join("")}</div>
+  </section>`).join("");
+  return layout("Badges — Burnfolio", `
+    <main class="profile badges-page">
+      <header class="profile-head">
+        <div>
+          <p class="eyebrow">Achievements</p>
+          <h1>Badges</h1>
+          <p class="profile-summary"><span>18 badges across three tiers, computed from real usage: Base Model, Fine-Tune, Frontier.</span></p>
+        </div>
+      </header>
+      ${sections}
+    </main>
+  `, {
+    description: "All 18 Burnfolio badges — Base Model, Fine-Tune, and Frontier tiers — with earned-by counts.",
+    canonical: "https://burnfolio.ai/badges",
+    signedIn: isSignedIn,
+  });
+}
+
+function badgeCard(def, count, earned) {
+  const isSecret = Boolean(def.secret);
+  const name = isSecret ? def.secretName : def.name;
+  const description = isSecret ? def.secretDescription : def.description;
+  const label = `${count} ${count === 1 ? "builder" : "builders"}`;
+  return `<div class="badge-card badge-tier-${def.tier}${earned ? " earned" : ""}">
+    <div class="badge-card-head"><i class="badge-dot" aria-hidden="true"></i><strong>${esc(name)}</strong>${earned ? `<span class="badge-earned-check" title="You earned this" aria-label="You earned this">&#10003;</span>` : ""}</div>
+    <p>${esc(description)}</p>
+    <p class="badge-earned-count">Earned by ${esc(label)}</p>
+  </div>`;
+}
+
 async function profileStatsRoute(env, ref) {
   const profile = await buildProfile(env, ref);
   if (!profile) return json({ error: "not_found" }, 404);
@@ -1541,6 +1790,11 @@ async function profileStatsRoute(env, ref) {
     payload.by_cli = economics.byTool;
     payload.top_models = economics.topModels;
   }
+  const { earned } = await profileBadgeStats(env, profile);
+  payload.badges = earned.map((key) => {
+    const def = badgeDef(key);
+    return { key, name: def.name, tier: def.tier };
+  });
   return json(payload, 200, { "Access-Control-Allow-Origin": "*" });
 }
 
@@ -1550,14 +1804,8 @@ async function profilePage(request, env, ref) {
   if (!profile) return html(notFoundPage(isSignedIn), 404);
   profile.economics = await profileEconomics(env, profile.account);
   profile.percentile = await accountPercentile(env, profile.account.id);
+  profile.badges = (await profileBadgeStats(env, profile)).earned;
   return html(profileHtml(profile, isSignedIn));
-}
-
-async function comparePage(request, env, refA, refB) {
-  const isSignedIn = await signedIn(request, env);
-  const [a, b] = await Promise.all([buildProfile(env, refA), buildProfile(env, refB)]);
-  if (!a || !b || a.account.id === b.account.id) return html(notFoundPage(isSignedIn), 404);
-  return html(compareHtml(a, b, isSignedIn));
 }
 
 async function leaderboardRoute(request, env) {
@@ -1574,7 +1822,9 @@ async function leaderboardPage(request, env) {
 
 function leaderboardHtml(payload, isSignedIn) {
   const isWeek = payload.range === "7d";
-  const rows = payload.entries.map(leaderboardRow).join("") || emptyState("No burn yet", "Sync usage with pyro to appear on the leaderboard.");
+  const individualRows = payload.individuals.map(leaderboardRow).join("") || emptyState("No burn yet", "Sync usage with pyro to appear on the leaderboard.");
+  const orgRows = payload.organizations.map(leaderboardRow).join("");
+  const claimCTA = isSignedIn ? "" : `<a class="leaderboard-cta" href="/signup">Your burn belongs here. Claim your spot &rarr;</a>`;
   return layout("Leaderboard — Burnfolio", `
     <main class="profile leaderboard-page">
       <header class="profile-head">
@@ -1588,7 +1838,15 @@ function leaderboardHtml(payload, isSignedIn) {
         <a class="theme-tab${isWeek ? "" : " active"}" role="tab" aria-selected="${isWeek ? "false" : "true"}" href="/leaderboard">All time</a>
         <a class="theme-tab${isWeek ? " active" : ""}" role="tab" aria-selected="${isWeek ? "true" : "false"}" href="/leaderboard?range=7d">Last 7 days</a>
       </nav>
-      <section class="leaderboard-list">${rows}</section>
+      ${claimCTA}
+      <section class="leaderboard-group">
+        <h2 class="leaderboard-group-title">Individuals</h2>
+        <div class="leaderboard-list">${individualRows}</div>
+      </section>
+      ${orgRows ? `<section class="leaderboard-group">
+        <h2 class="leaderboard-group-title">Organizations</h2>
+        <div class="leaderboard-list">${orgRows}</div>
+      </section>` : ""}
     </main>
   `, {
     description: "The Burnfolio leaderboard: top AI token burn, all time and last 7 days.",
@@ -1943,10 +2201,9 @@ async function cachedRankedAccountRows(env, range) {
   return rows;
 }
 
-async function fetchLeaderboard(env, range) {
-  const ranked = await cachedRankedAccountRows(env, range);
+async function rankedEntries(env, rankedSubset) {
   const entries = [];
-  for (const [index, row] of ranked.slice(0, LEADERBOARD_LIMIT).entries()) {
+  for (const [index, row] of rankedSubset.slice(0, LEADERBOARD_LIMIT).entries()) {
     const days = row.kind === "org" ? await orgDays(env, row.account_id) : await userDays(env, row.account_id);
     const stats = profileStats(days, int(row.total_tokens));
     entries.push({
@@ -1962,13 +2219,21 @@ async function fetchLeaderboard(env, range) {
   return entries;
 }
 
+async function fetchLeaderboard(env, range) {
+  const ranked = await cachedRankedAccountRows(env, range);
+  const individuals = await rankedEntries(env, ranked.filter((row) => row.kind === "user"));
+  const organizations = await rankedEntries(env, ranked.filter((row) => row.kind === "org"));
+  return { individuals, organizations };
+}
+
 async function cachedLeaderboard(env, range) {
   const cacheKey = new Request(`https://cache.internal/leaderboard/${range}`);
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
   if (cached) return cached.json();
-  const entries = await fetchLeaderboard(env, range);
-  const payload = { range, generated_at: new Date().toISOString(), entries };
+  const { individuals, organizations } = await fetchLeaderboard(env, range);
+  // `entries` kept for API back-compat (no internal consumer left after the split) — mirrors individuals, the closest match to the old combined+ranked list.
+  const payload = { range, generated_at: new Date().toISOString(), individuals, organizations, entries: individuals };
   const response = json(payload, 200, { "Cache-Control": "public, max-age=300" });
   await cache.put(cacheKey, response.clone());
   return payload;
@@ -2376,14 +2641,16 @@ async function appPage(request, env) {
     ? ` · ${esc(emails[0].email)}${emails[0].verified_at ? " verified" : " pending"}`
     : "";
   const history = await historyPanel(env, account);
+  const goals = await goalsPanel(env, account);
   return layout("Burnfolio dashboard", `
     <main class="dash">
       <header class="dash-head">
         <div><p class="eyebrow">Dashboard</p><h1>${esc(account.handle || "Anonymous builder")}</h1><p class="muted">Account <code>${esc(account.account_number)}</code>${emailSummary}</p></div>
         <div class="actions"><a class="button secondary" href="/${esc(profileRef)}">Public profile</a><button class="secondary" data-logout>Log out</button></div>
       </header>
+      ${history}
       <div class="dash-grid">
-        <section class="panel primary-panel">
+        <section class="panel">
           <div class="section-head"><div><h2>Connect a machine</h2><p class="muted">Create a token, then copy the generated install command.</p></div></div>
           <form class="form-row" data-machine><label class="sr-only" for="machine-name">Machine name</label><input id="machine-name" name="name" placeholder="machine name, e.g. macbook-pro">${machineScope}<button>Create token</button></form>
           <div class="result" data-machine-result hidden></div>
@@ -2394,12 +2661,15 @@ async function appPage(request, env) {
             <div class="snippet"><div><span>Uninstall command</span><button type="button" class="secondary copy" data-copy="${esc(uninstallCommand())}">Copy</button></div><code>${esc(uninstallCommand())}</code></div>
           </details>
         </section>
+        ${goals}
+      </div>
+      <div class="dash-grid">
         <section class="panel">
           <div class="section-head"><div><h2>Profile</h2><p class="muted">${esc(profileHelp)}</p></div></div>
           ${handleControl}
           ${profileMetadataForm(account, { kind: "user" })}
           ${openRouterPanel(openRouterConnections, { kind: "user" })}
-          <div class="email-list">${emails.map(emailRow).join("") || emptyState("No emails linked", "Add an email to use magic links and recover this profile.")}</div>
+          <div class="list">${emails.map(emailRow).join("") || emptyState("No emails linked", "Add an email to use magic links and recover this profile.")}</div>
           <form class="form-stack" data-email data-email-action data-resend-label="Send verification again"><label for="profile-email">Add another email</label><div class="form-row"><input id="profile-email" name="email" placeholder="you@example.com" autocomplete="email"><button class="secondary">Send verification</button></div></form>
           <pre class="result" data-email-result hidden></pre>
         </section>
@@ -2411,7 +2681,6 @@ async function appPage(request, env) {
           <div class="list">${orgs.results.map(orgRow).join("") || emptyState("No organizations yet", "Create an org when you want a shared burn graph for a team.")}</div>
         </section>
       </div>
-      ${history}
       ${dangerZone(account)}
     </main>
     <script>${dashboardScript(profileRef)}</script>
@@ -2546,8 +2815,9 @@ function openRouterConnectionRow(connection, kind, ref) {
     ? `/api/orgs/${encodeURIComponent(ref)}/openrouter/connections/${encodeURIComponent(connection.id)}`
     : `/api/openrouter/connections/${encodeURIComponent(connection.id)}`;
   const state = connection.status === "error" ? `Error${connection.last_error ? `: ${connection.last_error}` : ""}` : connection.last_sync_at ? `Synced ${formatDate(connection.last_sync_at.slice(0, 10))}` : "Waiting for first sync";
+  const label = connection.label || "OpenRouter";
   return `<div class="row integration-row" data-openrouter-connection="${esc(connection.id)}" data-openrouter-base="${esc(base)}">
-    <div><strong>${esc(connection.label || "OpenRouter")}</strong><span>${esc(state)}</span></div>
+    <div><strong title="${esc(label)}">${esc(label)}</strong><span>${esc(state)}</span></div>
     <div class="row-actions"><button type="button" class="secondary" data-openrouter-sync>Sync now</button><button type="button" class="secondary" data-openrouter-delete>Remove</button></div>
   </div>`;
 }
@@ -2569,29 +2839,32 @@ function orgMemberRow(org, member, canManage) {
         ${isOwner ? `<span class="row-note">Owner cannot be removed.</span>` : `<button type="button" class="secondary" data-remove-member data-org="${esc(orgRef)}" data-member="${esc(memberRef)}">${isPending ? "Cancel invite" : "Remove"}</button>`}
       </div>`
     : "";
-  return `<div class="row member-row"><div><strong>${esc(member.handle || member.display_name || member.account_number)}</strong><span>${esc(member.account_number)} · ${esc(member.role)}${isPending ? " · invited" : ""}</span></div>${controls}</div>`;
+  const memberName = member.handle || member.display_name || member.account_number;
+  return `<div class="row member-row"><div><strong title="${esc(memberName)}">${esc(memberName)}</strong><span>${esc(member.account_number)} · ${esc(member.role)}${isPending ? " · invited" : ""}</span></div>${controls}</div>`;
 }
 
 function machineRow(machine, fallbackProfileRef) {
   const profileRef = machine.org_handle || machine.org_account_number || fallbackProfileRef;
   const scope = machine.org_id ? `org ${machine.org_display_name || profileRef}` : "personal profile";
+  const name = machine.name || machine.machine_number;
   const action = `<button type="button" class="secondary copy" data-refresh-machine="${esc(machine.machine_number)}">Rotate token</button><span class="row-note">Reveals a fresh install command once. The previous token stops working.</span>`;
-  return `<div class="row machine-row"><div><strong>${esc(machine.name || machine.machine_number)}</strong><span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
+  return `<div class="row machine-row"><div><strong title="${esc(name)}">${esc(name)}</strong><span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
 }
 
 function orgRow(org) {
   const ref = org.handle || org.account_number;
-  return `<div class="row"><div><strong><a href="/${esc(ref)}">${esc(ref)}</a></strong><span>${esc(org.display_name || "Organization")} · ${esc(org.role)}</span></div><div class="row-actions"><a class="button secondary" href="/app/orgs?org=${encodeURIComponent(ref)}">Manage</a></div></div>`;
+  return `<div class="row"><div><strong><a href="/${esc(ref)}" title="${esc(ref)}">${esc(ref)}</a></strong><span>${esc(org.display_name || "Organization")} · ${esc(org.role)}</span></div><div class="row-actions"><a class="button secondary" href="/app/orgs?org=${encodeURIComponent(ref)}">Manage</a></div></div>`;
 }
 
 function orgInviteRow(org) {
   const ref = org.handle || org.account_number;
-  return `<div class="row" data-org-invite="${esc(ref)}"><div><strong>${esc(org.display_name || ref)}</strong><span>Invited as ${esc(org.role)}</span></div><div class="row-actions"><button type="button" data-invite-accept data-org="${esc(ref)}">Accept</button><button type="button" class="secondary" data-invite-decline data-org="${esc(ref)}">Decline</button></div></div>`;
+  const name = org.display_name || ref;
+  return `<div class="row" data-org-invite="${esc(ref)}"><div><strong title="${esc(name)}">${esc(name)}</strong><span>Invited as ${esc(org.role)}</span></div><div class="row-actions"><button type="button" data-invite-accept data-org="${esc(ref)}">Accept</button><button type="button" class="secondary" data-invite-decline data-org="${esc(ref)}">Decline</button></div></div>`;
 }
 
 function emailRow(row) {
   const state = row.verified_at ? "Verified" : "Pending verification";
-  return `<div class="email-row"><div><strong>${esc(row.email)}</strong><span>${esc(state)}${row.is_primary ? " · primary" : ""}</span></div></div>`;
+  return `<div class="row email-row"><div><strong title="${esc(row.email)}">${esc(row.email)}</strong><span>${esc(state)}${row.is_primary ? " · primary" : ""}</span></div></div>`;
 }
 
 function uninstallCommand() {
@@ -2622,7 +2895,6 @@ function profileHtml(profile, isSignedIn = false) {
         </div>
         <div class="actions"><button class="share-button" type="button" data-share-open data-share-image="${esc(shareImagePath)}" data-share-text="${esc(shareText)}">Share</button><button class="secondary" data-copy="${esc(profileURL)}">Copy link</button></div>
       </header>
-      <p class="compare-hint"><button type="button" class="link-button" data-compare="${esc(name)}">Compare with another profile</button></p>
       ${profileAbout(profile.account)}
       <section class="stats">
         ${statCard("Total burn", formatCompact(profile.total_tokens), `${formatInt(profile.total_tokens)} exact`)}
@@ -2634,6 +2906,7 @@ function profileHtml(profile, isSignedIn = false) {
         ${statCard("Daily average", formatCompact(stats.average_active_day_tokens), "on active days")}
         ${profile.percentile ? statCard("Percentile", `Top ${profile.percentile.percentile}%`, "by total tokens", "Among all Burnfolio profiles by total tokens.") : ""}
       </section>
+      ${badgeChipRow(profile.badges)}
       ${heatmap(profile.days, { title: "Past year", subtitle: `${formatInt(stats.last_365_tokens)} tokens burned`, eras: true })}
       ${heatmapYears(profile.days).length > 1 ? heatmapTimeline(profile.days, { title: "All-time by year", subtitle: "Grouped by calendar year" }) : ""}
       ${sourceBreakdownSection(profile.economics)}
@@ -2648,85 +2921,6 @@ function profileHtml(profile, isSignedIn = false) {
     image: shareImageURL,
     imageType: "image/png",
     canonical: profileURL,
-    siteName: "Burnfolio",
-    signedIn: isSignedIn,
-  });
-}
-
-function compareDisplayName(account) {
-  if (account.handle) return account.handle;
-  if (account.display_name && account.display_name !== "Anonymous builder" && account.display_name !== account.account_number) return account.display_name;
-  return account.account_number;
-}
-
-function formatRatio(value) {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value >= 100) return Math.round(value).toString();
-  return value.toFixed(1);
-}
-
-function compareRatioLine(a, b, nameA, nameB) {
-  const totalA = a.total_tokens;
-  const totalB = b.total_tokens;
-  if (totalA === 0 && totalB === 0) return `Neither ${nameA} nor ${nameB} has burned any tokens yet.`;
-  if (totalA === 0 || totalB === 0) {
-    const [zeroName, activeName] = totalA === 0 ? [nameA, nameB] : [nameB, nameA];
-    return `${activeName} has burned tokens; ${zeroName} hasn't started yet.`;
-  }
-  const higherFirst = totalA >= totalB;
-  const higherTotal = higherFirst ? totalA : totalB;
-  const higherName = higherFirst ? nameA : nameB;
-  const lowerTotal = higherFirst ? totalB : totalA;
-  const lowerName = higherFirst ? nameB : nameA;
-  if (higherTotal === lowerTotal) return `${nameA} and ${nameB} have burned the same amount.`;
-  return `${higherName} has burned ${formatRatio(higherTotal / lowerTotal)}× ${lowerName}'s tokens.`;
-}
-
-function compareColumn(profile) {
-  const account = profile.account;
-  const ref = accountRef(account);
-  const displayName = compareDisplayName(account);
-  const stats = profile.stats;
-  return `<div class="compare-column">
-    <h2><a href="/${esc(ref)}">${esc(displayName)}</a></h2>
-    <section class="stats compact-stats">
-      ${statCard("Total burn", formatCompact(profile.total_tokens))}
-      ${statCard("Active days", formatInt(stats.active_days))}
-      ${statCard("Best day", formatCompact(stats.best_day_tokens))}
-      ${statCard("Current streak", formatInt(stats.current_streak_days))}
-      ${statCard("Longest streak", formatInt(stats.longest_streak_days))}
-    </section>
-    ${heatmap(profile.days, { compact: true, learn: false, subtitle: "Past year" })}
-  </div>`;
-}
-
-function compareHtml(a, b, isSignedIn = false) {
-  const rawNameA = compareDisplayName(a.account);
-  const rawNameB = compareDisplayName(b.account);
-  const nameA = esc(rawNameA);
-  const nameB = esc(rawNameB);
-  const refA = accountRef(a.account);
-  const refB = accountRef(b.account);
-  const ratioLine = compareRatioLine(a, b, nameA, nameB);
-  const title = `${rawNameA} vs ${rawNameB} on Burnfolio`;
-  const description = `${rawNameA} has burned ${formatInt(a.total_tokens)} tokens. ${rawNameB} has burned ${formatInt(b.total_tokens)} tokens.`;
-  return layout(title, `
-    <main class="profile compare-page">
-      <header class="profile-head">
-        <div>
-          <p class="eyebrow">Compare</p>
-          <h1>${nameA} vs ${nameB}</h1>
-          <p class="profile-summary"><span>${ratioLine}</span></p>
-        </div>
-      </header>
-      <div class="compare-grid">
-        ${compareColumn(a)}
-        ${compareColumn(b)}
-      </div>
-    </main>
-  `, {
-    description,
-    canonical: `https://burnfolio.ai/vs/${encodeURIComponent(refA)}/${encodeURIComponent(refB)}`,
     siteName: "Burnfolio",
     signedIn: isSignedIn,
   });
@@ -3308,6 +3502,7 @@ function siteFooter() {
     <div class="site-footer-links">
       <a href="https://github.com/nbitslabs/burnfolio" rel="noopener noreferrer" target="_blank">GitHub</a>
       <a href="/leaderboard">Leaderboard</a>
+      <a href="/badges">Badges</a>
       <a href="/how-we-count">How we count</a>
       <a href="/privacy">Privacy</a>
     </div>
@@ -3494,6 +3689,21 @@ function statCard(label, value, detail = "", tip = "") {
   return `<div><span>${esc(label)}${tipMarkup}</span><strong>${esc(value)}</strong>${detail ? `<em>${esc(detail)}</em>` : ""}</div>`;
 }
 
+function badgeChipRow(earnedKeys) {
+  if (!earnedKeys || !earnedKeys.length) return "";
+  const defs = earnedKeys.map(badgeDef).filter(Boolean);
+  const rank = { rare: 0, uncommon: 1, common: 2 };
+  defs.sort((a, b) => rank[a.tier] - rank[b.tier]);
+  const shown = defs.slice(0, 6);
+  const extra = defs.length - shown.length;
+  const chips = shown.map((def) => {
+    const tip = `${def.description} (${badgeTooltip(def)})`;
+    return `<span class="badge-chip badge-tier-${def.tier}" data-tip="${esc(tip)}" title="${esc(tip)}" tabindex="0"><i class="badge-dot" aria-hidden="true"></i>${esc(def.name)}</span>`;
+  }).join("");
+  const more = extra > 0 ? `<a class="badge-more" href="/badges">+${extra} more</a>` : "";
+  return `<div class="badge-chip-row">${chips}${more}</div>`;
+}
+
 function sourceBreakdownSection(economics) {
   if (!economics || !economics.hasBreakdown) return "";
   const toolBars = economics.byTool.map((row) => `
@@ -3515,40 +3725,91 @@ function sourceBreakdownSection(economics) {
 const HISTORY_CHART_DAYS = 90;
 const HISTORY_TABLE_DAYS = 30;
 
-function goalPanel(account, monthDays) {
+function badgeProgressLabel(def, bundle) {
+  const fmt = formatCompact;
+  switch (def.key) {
+    case "warm_cache": return `${fmt(bundle.lifetimeTokens)} / ${fmt(100_000_000)} tokens`;
+    case "training_loop": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 7 day streak`;
+    case "multi_agent": return `${bundle.distinctTools} / 3 tools`;
+    case "model_collector": return `${bundle.distinctModels} / 5 models`;
+    case "always_on": return `${bundle.activeDays} / 30 active days`;
+    case "billion_token_brain": return `${fmt(bundle.lifetimeTokens)} / ${fmt(1_000_000_000)} tokens`;
+    case "epoch": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 30 day streak`;
+    case "overclocked": return `${fmt(bundle.bestDayTokens)} / ${fmt(100_000_000)} best day`;
+    case "orchestrator": return `${bundle.distinctTools} / 5 tools`;
+    case "ensemble": return `${bundle.distinctModels} / 10 models`;
+    case "cache_whisperer": return `${fmt(bundle.cacheReadTokens)} cache-read so far`;
+    case "pretraining_run": return `${fmt(bundle.lifetimeTokens)} / ${fmt(10_000_000_000)} tokens`;
+    case "foundation_model": return `${fmt(bundle.lifetimeTokens)} / ${fmt(100_000_000_000)} tokens`;
+    case "convergence": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 100 day streak`;
+    case "datacenter_cosplay": return `${fmt(bundle.bestDayTokens)} / ${fmt(1_000_000_000)} best day`;
+    case "mixture_of_experts": return `${bundle.distinctModels} / 25 models`;
+    default: return "";
+  }
+}
+
+function badgeProgressRow(def, fraction, bundle) {
+  const pct = Math.round(Math.min(1, Math.max(0, fraction)) * 100);
+  const tip = `${def.description} (${badgeTooltip(def)})`;
+  return `<div class="badge-progress-row" data-tip="${esc(tip)}" title="${esc(tip)}">
+    <div class="badge-progress-row-head"><span>${esc(def.name)}</span><span class="muted">${esc(badgeProgressLabel(def, bundle))}</span></div>
+    <div class="goal-progress-track"><div class="goal-progress-fill" style="width:${pct}%"></div></div>
+  </div>`;
+}
+
+async function goalsPanel(env, account) {
+  const days = await userDays(env, account.id);
+  const total = days.reduce((sum, d) => sum + d.total_tokens, 0);
+  const stats = profileStats(days, total);
+  const bundle = await badgeBundleFor(env, account, stats, total);
+  const earned = new Set(computeBadges(bundle));
+
+  const monthStart = `${todayUTCDate().toISOString().slice(0, 7)}-01`;
+  const monthToDate = days.filter((d) => d.date_utc >= monthStart).reduce((sum, d) => sum + int(d.total_tokens), 0);
   const goal = int(account.monthly_goal_tokens);
   const hasGoal = goal > 0;
-  const monthStart = `${todayUTCDate().toISOString().slice(0, 7)}-01`;
-  const monthToDate = (monthDays || []).filter((d) => d.date_utc >= monthStart).reduce((sum, d) => sum + int(d.total_tokens), 0);
   const pct = hasGoal ? Math.round((monthToDate / goal) * 100) : 0;
   const barPct = Math.min(100, pct);
   const met = hasGoal && pct >= 100;
-  return `<div class="goal-panel">
-    <h3>Monthly goal</h3>
-    <form class="form-row" data-goal>
-      <label class="sr-only" for="goal-tokens">Monthly token goal</label>
-      <input id="goal-tokens" name="monthly_goal_tokens" type="number" min="0" step="1" placeholder="e.g. 5000000" value="${hasGoal ? goal : ""}">
-      <button type="submit" class="secondary">Save goal</button>
-    </form>
-    ${hasGoal ? `<div class="goal-progress">
-      <div class="goal-progress-track"><div class="goal-progress-fill${met ? " met" : ""}" style="width:${barPct}%"></div></div>
-      <p class="muted">${formatCompact(monthToDate)} / ${formatCompact(goal)} tokens this month (${pct}%)${met ? " — Goal met \u{1F525}" : ""}</p>
-    </div>` : `<p class="muted">Set a monthly token goal to track progress here. This is private and never shown on your public profile.</p>`}
-  </div>`;
+
+  const nearest = BADGE_DEFS
+    .filter((def) => !def.secret && !earned.has(def.key))
+    .map((def) => ({ def, fraction: Math.min(badgeProgress(def, bundle), 0.99) }))
+    .sort((a, b) => b.fraction - a.fraction)
+    .slice(0, 4);
+  const earnedCount = BADGE_DEFS.filter((def) => earned.has(def.key)).length;
+
+  return `<section class="panel goals-panel">
+    <div class="section-head"><div><h2>Goals</h2><p class="muted">Your monthly burn goal and nearest badge progress. Private — never shown on your public profile.</p></div></div>
+    <div class="goal-panel">
+      <h3>Monthly goal</h3>
+      <form class="form-row" data-goal>
+        <label class="sr-only" for="goal-tokens">Monthly token goal</label>
+        <input id="goal-tokens" name="monthly_goal_tokens" type="number" min="0" step="1" placeholder="e.g. 5000000" value="${hasGoal ? goal : ""}">
+        <button type="submit" class="secondary">Save goal</button>
+      </form>
+      ${hasGoal ? `<div class="goal-progress">
+        <div class="goal-progress-track"><div class="goal-progress-fill${met ? " met" : ""}" style="width:${barPct}%"></div></div>
+        <p class="muted">${formatCompact(monthToDate)} / ${formatCompact(goal)} tokens this month (${pct}%)${met ? " — Goal met \u{1F525}" : ""}</p>
+      </div>` : `<p class="muted">Set a monthly token goal to track progress here.</p>`}
+    </div>
+    <div class="badge-progress-list">
+      <h3>Nearest badges</h3>
+      ${nearest.length ? nearest.map((n) => badgeProgressRow(n.def, n.fraction, bundle)).join("") : `<p class="muted">All badges earned. Nicely done.</p>`}
+    </div>
+    <p class="goals-earned-line">${earnedCount} of ${BADGE_DEFS.length} badges earned &middot; <a href="/badges">View all &rarr;</a></p>
+  </section>`;
 }
 
 async function historyPanel(env, account) {
   const userID = account.id;
-  const [componentRows, sourceRows, monthDays] = await Promise.all([
+  const [componentRows, sourceRows] = await Promise.all([
     userDailyComponentRows(env, userID),
     userDailySourceRows(env, userID),
-    userDays(env, userID),
   ]);
-  const goal = goalPanel(account, monthDays);
   if (!componentRows.length) {
     return `<section class="panel history-panel">
       <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show recent activity.</p></div></div>
-      ${goal}
       ${emptyState("No usage yet", "Sync with pyro or connect OpenRouter to start filling in your history.")}
     </section>`;
   }
@@ -3585,7 +3846,6 @@ async function historyPanel(env, account) {
 
   return `<section class="panel history-panel">
     <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show the last ${HISTORY_CHART_DAYS} days.</p></div></div>
-    ${goal}
     <div class="history-chart-wrap">${historyBarChartSVG(last90)}</div>
     ${historyToolSplit(toolTotals90)}
     <div class="history-actions">
@@ -4564,13 +4824,6 @@ function globalScript() {
       });
     }
     requestAnimationFrame(() => scrollHeatmapsToNow());
-    document.querySelectorAll("[data-compare]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const other = prompt("Compare with which profile? Enter a username or account number.");
-        if (!other || !other.trim()) return;
-        location.href = "/vs/" + encodeURIComponent(button.dataset.compare) + "/" + encodeURIComponent(other.trim().replace(/^@/, ""));
-      });
-    });
     (function recentTicker() {
       const root = document.querySelector("[data-recent-ticker]");
       if (!root) return;
