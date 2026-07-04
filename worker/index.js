@@ -5,6 +5,7 @@ const MAX_SYNC_DAYS = 3000;
 const MAX_TOKEN_FIELD = 1_000_000_000_000;
 const MAX_RECORDS_PER_DAY = 1_000_000;
 const MAX_SOURCE_ROWS_PER_DAY = 200;
+const LATEST_PYRO_VERSION = "v0.1.4";
 
 const MIN_INGEST_DATE = "2020-01-01";
 const DEFAULT_MAX_DAILY_TOKENS_PER_SOURCE = 100_000_000_000;
@@ -1417,6 +1418,14 @@ async function fetchOpenRouterUsageRange(key, start, end) {
   return { days };
 }
 
+// Unlike the day-totals query (one row per day, so a 366-day window is well
+// under the API's row limit), the model-dimension query returns one row per
+// (day, model) — a wide account can report dozens of distinct models a day,
+// so a 366-day window can exceed MAX_SYNC_DAYS (3000) rows and get silently
+// truncated by the API. Chunk into windows of at most MODEL_USAGE_CHUNK_DAYS
+// (45 days × up to 60 models/day ≈ 2700 rows, comfortably under the limit).
+const MODEL_USAGE_CHUNK_DAYS = 45;
+
 async function fetchOpenRouterModelUsageDays(key, start, end) {
   const startDate = parseUTCDate(start);
   const endDate = new Date(end);
@@ -1424,7 +1433,7 @@ async function fetchOpenRouterModelUsageDays(key, start, end) {
   const allDays = [];
   for (let cursor = new Date(startDate); cursor < endDate;) {
     const chunkEnd = new Date(cursor);
-    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 366);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + MODEL_USAGE_CHUNK_DAYS);
     const effectiveEnd = chunkEnd < endDate ? chunkEnd : endDate;
     const result = await fetchOpenRouterModelUsageRange(key, cursor.toISOString().slice(0, 10), effectiveEnd.toISOString());
     if (result.error) return result;
@@ -2659,6 +2668,7 @@ async function machineRows(env, userID) {
       m.name,
       m.created_at,
       m.last_seen_at,
+      m.last_pyro_version,
       m.org_id,
       oa.account_number AS org_account_number,
       oh.handle AS org_handle,
@@ -3190,12 +3200,34 @@ function orgMemberRow(org, member, canManage) {
   return `<div class="row member-row"><div><strong title="${esc(memberName)}">${esc(memberName)}</strong><span>${esc(member.account_number)} · ${esc(member.role)}${isPending ? " · invited" : ""}</span></div>${controls}</div>`;
 }
 
+// Simple numeric vX.Y.Z compare — unparseable versions (missing/malformed)
+// are treated as unknown, not outdated, so we never guess at a machine we
+// can't confidently read a version for.
+function pyroVersionParts(version) {
+  const match = String(version || "").trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function isPyroVersionOutdated(version, latest) {
+  const current = pyroVersionParts(version);
+  const target = pyroVersionParts(latest);
+  if (!current || !target) return false;
+  for (let i = 0; i < 3; i++) {
+    if (current[i] < target[i]) return true;
+    if (current[i] > target[i]) return false;
+  }
+  return false;
+}
+
 function machineRow(machine, fallbackProfileRef) {
   const profileRef = machine.org_handle || machine.org_account_number || fallbackProfileRef;
   const scope = machine.org_id ? `org ${machine.org_display_name || profileRef}` : "personal profile";
   const name = machine.name || machine.machine_number;
+  const outdated = machine.last_seen_at && machine.last_pyro_version && isPyroVersionOutdated(machine.last_pyro_version, LATEST_PYRO_VERSION);
+  const updateTip = `This machine last synced with pyro ${machine.last_pyro_version}. Re-run the install command to update.`;
+  const updateChip = outdated ? `<span class="chip muted-chip" data-tip="${esc(updateTip)}" title="${esc(updateTip)}" tabindex="0" role="img" aria-label="${esc(updateTip)}">Update available</span>` : "";
   const action = `<button type="button" class="secondary copy" data-refresh-machine="${esc(machine.machine_number)}">Rotate token</button><span class="row-note">Reveals a fresh install command once. The previous token stops working.</span>`;
-  return `<div class="row machine-row"><div><strong title="${esc(name)}">${esc(name)}</strong><span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
+  return `<div class="row machine-row"><div><strong title="${esc(name)}">${esc(name)}</strong>${updateChip}<span>${esc(machine.machine_number)} · ${esc(scope)}${machine.last_seen_at ? ` · seen ${esc(formatDate(machine.last_seen_at.slice(0, 10)))}` : " · never synced"}</span></div><div class="row-actions">${action}</div></div>`;
 }
 
 function orgRow(org) {
@@ -4377,7 +4409,7 @@ async function historyPanel(env, account) {
     last90.push({ date_utc: key, total_tokens: row ? int(row.total_tokens) : 0 });
   }
 
-  const sourceByDate = dailyTopBreakdown(sourceRows);
+  const sourceByDate = dailyTopBreakdown(sourceRows, componentByDate);
   const toolTotals90 = summarizeSourceRows(sourceRows.filter((r) => r.date_utc >= start90));
 
   const tableRows = [];
@@ -4389,8 +4421,10 @@ async function historyPanel(env, account) {
       date_utc: key,
       total_tokens: row ? int(row.total_tokens) : 0,
       records: row ? int(row.records) : 0,
-      topCli: top ? top.topCli : "",
       topModel: top ? top.topModel : "",
+      lowCoverage: top ? top.lowCoverage : false,
+      tools: top ? top.tools : [],
+      dayTotal: top ? top.dayTotal : 0,
     });
   }
 
@@ -4406,22 +4440,92 @@ async function historyPanel(env, account) {
   </section>`;
 }
 
-function dailyTopBreakdown(sourceRows) {
+// Coverage-aware top tool/model per day: source rows (per-cli/per-model) are
+// optional detail on top of the day's total — old pyro versions upload day
+// totals with no source breakdown at all, and a partial breakdown (e.g. only
+// one of several tools/connections reporting) can crown a misleading "top"
+// pick from a small slice of the day. Only surface a winner when the source
+// rows we have actually cover at least half of that day's real total;
+// otherwise report low coverage so the caller can render "—" honestly.
+function dailyTopBreakdown(sourceRows, componentByDate) {
   const byDate = new Map();
   for (const row of sourceRows) {
-    if (!byDate.has(row.date_utc)) byDate.set(row.date_utc, { cli: new Map(), model: new Map() });
+    if (!byDate.has(row.date_utc)) byDate.set(row.date_utc, { cli: new Map(), model: new Map(), sourceTotal: 0 });
     const bucket = byDate.get(row.date_utc);
     const tokens = int(row.total_tokens);
     bucket.cli.set(row.cli, (bucket.cli.get(row.cli) || 0) + tokens);
     bucket.model.set(row.model, (bucket.model.get(row.model) || 0) + tokens);
+    bucket.sourceTotal += tokens;
   }
+  const dates = new Set([...byDate.keys(), ...componentByDate.keys()]);
   const result = new Map();
-  for (const [date, bucket] of byDate) {
-    const topCli = [...bucket.cli.entries()].sort((a, b) => b[1] - a[1])[0];
-    const topModel = [...bucket.model.entries()].sort((a, b) => b[1] - a[1])[0];
-    result.set(date, { topCli: topCli ? topCli[0] : "", topModel: topModel ? topModel[0] : "" });
+  for (const date of dates) {
+    const dayTotal = int((componentByDate.get(date) || {}).total_tokens);
+    const bucket = byDate.get(date);
+    const sourceTotal = bucket ? bucket.sourceTotal : 0;
+    const covered = dayTotal > 0 && sourceTotal / dayTotal >= 0.5;
+    const topModel = bucket ? [...bucket.model.entries()].sort((a, b) => b[1] - a[1])[0] : null;
+    const tools = bucket
+      ? [...bucket.cli.entries()].sort((a, b) => b[1] - a[1]).map(([cli, tokens]) => ({ cli, tokens }))
+      : [];
+    result.set(date, {
+      topModel: covered && topModel ? topModel[0] : "",
+      lowCoverage: dayTotal > 0 && !covered,
+      tools,
+      dayTotal,
+    });
   }
   return result;
+}
+
+// Small fixed palette for the per-day tool-mix strip, derived from the
+// existing brand/heat tokens. Tools are assigned a color the first time
+// they're seen (in on-page render order) so a given tool keeps the same
+// color across every row in that render, even though CLI names are
+// free-form and not known ahead of time.
+const TOOL_MIX_PALETTE = [
+  "var(--burnfolio-flame)",
+  "var(--burnfolio-ember)",
+  "var(--burnfolio-glow)",
+  "var(--burnfolio-blaze)",
+  "var(--burnfolio-flame-bright)",
+  "var(--burnfolio-heat-2)",
+  "var(--burnfolio-flame-deep)",
+  "var(--burnfolio-heat-1)",
+];
+
+function assignToolMixColors(tableRows) {
+  const colors = new Map();
+  for (const row of tableRows) {
+    for (const tool of row.tools) {
+      if (!colors.has(tool.cli)) colors.set(tool.cli, TOOL_MIX_PALETTE[colors.size % TOOL_MIX_PALETTE.length]);
+    }
+  }
+  return colors;
+}
+
+function toolMixLegend(toolColors) {
+  if (!toolColors.size) return "";
+  const items = [...toolColors.entries()].map(([cli, color]) =>
+    `<span class="tool-legend-item"><i class="tool-legend-dot" style="background:${color}"></i>${esc(cli)}</span>`
+  ).join("");
+  return `<div class="tool-legend">${items}</div>`;
+}
+
+const TOOL_MIX_UNKNOWN_TIP = "Not enough per-tool data for this day — update pyro and re-sync.";
+
+function toolMixStrip(row, toolColors) {
+  if (row.lowCoverage) {
+    return `<span class="tool-mix-strip muted" data-tip="${esc(TOOL_MIX_UNKNOWN_TIP)}" title="${esc(TOOL_MIX_UNKNOWN_TIP)}" tabindex="0" role="img" aria-label="${esc(TOOL_MIX_UNKNOWN_TIP)}"></span>`;
+  }
+  if (!row.tools.length || !row.dayTotal) return `<span class="tool-mix-strip empty" aria-hidden="true"></span>`;
+  const segments = row.tools.map((tool) => {
+    const pct = Math.round((tool.tokens / row.dayTotal) * 100);
+    const tip = `${tool.cli} · ${formatCompact(tool.tokens)} · ${pct}%`;
+    const color = toolColors.get(tool.cli) || TOOL_MIX_PALETTE[0];
+    return `<span class="tool-mix-segment" style="flex-grow:${tool.tokens};background:${color}" data-tip="${esc(tip)}" title="${esc(tip)}" tabindex="0" role="img" aria-label="${esc(tip)}"></span>`;
+  }).join("");
+  return `<span class="tool-mix-strip">${segments}</span>`;
 }
 
 function historyBarChartSVG(days) {
@@ -4471,17 +4575,20 @@ function historyToolSplit(breakdown) {
 }
 
 function historyTable(rows) {
+  const lowCoverageDash = `<span class="muted" data-tip="${esc(TOOL_MIX_UNKNOWN_TIP)}" title="${esc(TOOL_MIX_UNKNOWN_TIP)}" tabindex="0" role="img" aria-label="${esc(TOOL_MIX_UNKNOWN_TIP)}">&mdash;</span>`;
+  const toolColors = assignToolMixColors(rows);
   const body = rows.map((row) => `
     <tr>
       <td>${esc(formatDate(row.date_utc))}</td>
       <td>${formatInt(row.total_tokens)}</td>
       <td>${formatInt(row.records)}</td>
-      <td>${row.topCli ? esc(row.topCli) : "—"}</td>
-      <td>${row.topModel ? esc(row.topModel) : "—"}</td>
+      <td>${toolMixStrip(row, toolColors)}</td>
+      <td>${row.lowCoverage ? lowCoverageDash : row.topModel ? esc(row.topModel) : "—"}</td>
     </tr>`).join("");
   return `<div class="history-table-wrap">
+    ${toolMixLegend(toolColors)}
     <table class="history-table">
-      <thead><tr><th>Date</th><th>Total tokens</th><th>Records</th><th>Top tool</th><th>Top model</th></tr></thead>
+      <thead><tr><th>Date</th><th>Total tokens</th><th>Records</th><th>Tools</th><th>Top model</th></tr></thead>
       <tbody>${body}</tbody>
     </table>
   </div>`;
