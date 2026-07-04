@@ -670,12 +670,12 @@ async function recentActivity(env) {
   const badges = (badgeRows.results || []).map((r) => {
     const def = badgeDef(r.badge_key);
     if (!def) return null;
-    const ref = r.handle || "Anonymous builder";
     return {
       type: "badge",
       badge_name: def.name,
       badge_tier: def.tier,
-      ref,
+      ref: r.handle || "Anonymous builder",
+      profile_ref: r.handle || r.account_number,
       at: r.earned_at,
     };
   }).filter(Boolean);
@@ -2882,7 +2882,10 @@ function recentSyncsTicker(recent) {
 
 function recentActivityItem(r) {
   if (r.type === "badge") {
-    return `<li><strong>${esc(r.ref)}</strong> earned <strong>${esc(r.badge_name)}</strong> &middot; <span data-since="${esc(r.at)}">recently</span></li>`;
+    const who = r.profile_ref
+      ? `<a href="/${esc(r.profile_ref)}"><strong>${esc(r.ref)}</strong></a>`
+      : `<strong>${esc(r.ref)}</strong>`;
+    return `<li>${who} earned <strong>${esc(r.badge_name)}</strong> &middot; <span data-since="${esc(r.at)}">recently</span></li>`;
   }
   return `<li><strong>${esc(r.tokens_display)}</strong> tokens synced &middot; <span data-since="${esc(r.at)}">recently</span></li>`;
 }
@@ -5329,8 +5332,14 @@ function globalScript() {
           since.dataset.since = r.at;
           since.textContent = "recently";
           if (r.type === "badge") {
-            const who = document.createElement("strong");
-            who.textContent = r.ref;
+            const whoName = document.createElement("strong");
+            whoName.textContent = r.ref;
+            let who = whoName;
+            if (r.profile_ref) {
+              who = document.createElement("a");
+              who.href = "/" + encodeURIComponent(r.profile_ref);
+              who.appendChild(whoName);
+            }
             const badgeName = document.createElement("strong");
             badgeName.textContent = r.badge_name;
             li.append(who, document.createTextNode(" earned "), badgeName, document.createTextNode(" · "), since);
