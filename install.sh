@@ -11,6 +11,9 @@ providers="amp,claude,codebuff,codex,copilot,droid,gemini,goose,hermes,kilo,kimi
 openrouter_key=""
 openrouter_profile=""
 openrouter_since="2020-01-01"
+longwire_key=""
+longwire_profile=""
+longwire_since="2026-01-01"
 schedule=""
 run_sync=1
 
@@ -31,6 +34,9 @@ Options:
   --openrouter-key <key>            OpenRouter management key for local usage import.
   --openrouter-profile <profile>    Burnfolio profile or org for OpenRouter usage. Defaults to --profile.
   --openrouter-since <date>         First OpenRouter usage date to import. Defaults to 2020-01-01.
+  --longwire-key <key>              longwire management key (lw_mk_...) for local usage import.
+  --longwire-profile <profile>      Burnfolio profile or org for longwire usage. Defaults to --profile.
+  --longwire-since <date>           First longwire usage date to import. Defaults to 2026-01-01.
   --install-dir <dir>               Install directory. Defaults to /usr/local/bin or ~/.local/bin.
   --version <tag|latest>            Release tag to install. Defaults to latest.
   --no-run                          Install/configure only; do not run an immediate sync.
@@ -81,6 +87,18 @@ while [ "$#" -gt 0 ]; do
       openrouter_since="${2:-}"; shift 2 ;;
     --openrouter-since=*)
       openrouter_since="${1#*=}"; shift ;;
+    --longwire-key)
+      longwire_key="${2:-}"; shift 2 ;;
+    --longwire-key=*)
+      longwire_key="${1#*=}"; shift ;;
+    --longwire-profile)
+      longwire_profile="${2:-}"; shift 2 ;;
+    --longwire-profile=*)
+      longwire_profile="${1#*=}"; shift ;;
+    --longwire-since)
+      longwire_since="${2:-}"; shift 2 ;;
+    --longwire-since=*)
+      longwire_since="${1#*=}"; shift ;;
     --install-dir)
       install_dir="${2:-}"; shift 2 ;;
     --install-dir=*)
@@ -115,6 +133,14 @@ fi
 if [ -n "$openrouter_key" ] && [ -z "$profile" ] && [ ! -r /dev/tty ]; then
   die "--openrouter-key requires --profile and --machine"
 fi
+if [ -n "$longwire_key" ] && [ -z "$profile" ] && [ ! -r /dev/tty ]; then
+  die "--longwire-key requires --profile and --machine"
+fi
+case "$longwire_key" in
+  ""|lw_mk_*) ;;
+  lw_sk_*) die "--longwire-key needs a management key (lw_mk_...), not an inference key (lw_sk_...)" ;;
+  *) die "--longwire-key must be a longwire management key (lw_mk_...)" ;;
+esac
 
 need curl
 need tar
@@ -259,6 +285,9 @@ fi
 if [ -n "$openrouter_key" ] && [ -z "$openrouter_profile" ]; then
   openrouter_profile="$profile"
 fi
+if [ -n "$longwire_key" ] && [ -z "$longwire_profile" ]; then
+  longwire_profile="$profile"
+fi
 
 if [ -n "$profile" ] && [ -z "$schedule" ]; then
   schedule="$(prompt_schedule)"
@@ -271,6 +300,9 @@ fi
 if [ -n "$openrouter_key" ]; then
   install_args+=(--openrouter-key "$openrouter_key" --openrouter-profile "$openrouter_profile" --openrouter-since "$openrouter_since")
 fi
+if [ -n "$longwire_key" ]; then
+  install_args+=(--longwire-key "$longwire_key" --longwire-profile "$longwire_profile" --longwire-since "$longwire_since")
+fi
 if [ -n "$schedule" ]; then
   install_args+=(--schedule "$schedule")
 fi
@@ -282,6 +314,9 @@ if [ "$run_sync" = "1" ]; then
     sync_args=(--providers "$providers" --server "$server" --profile "$profile" --machine "$machine")
     if [ -n "$openrouter_key" ]; then
       sync_args+=(--openrouter-key "$openrouter_key" --openrouter-profile "$openrouter_profile" --openrouter-since "$openrouter_since")
+    fi
+    if [ -n "$longwire_key" ]; then
+      sync_args+=(--longwire-key "$longwire_key" --longwire-profile "$longwire_profile" --longwire-since "$longwire_since")
     fi
     "$pyro_path" "${sync_args[@]}"
   else

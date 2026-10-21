@@ -77,6 +77,9 @@ Useful installer flags:
 --openrouter-key <management-key>
 --openrouter-profile <account-or-org>
 --openrouter-since 2020-01-01
+--longwire-key <management-key>
+--longwire-profile <account-or-org>
+--longwire-since 2026-01-01
 --server https://burnfolio.ai
 --install-dir ~/.local/bin
 --version v0.1.2
@@ -124,6 +127,7 @@ pyro --no-sync
 pyro --home /path/to/home
 pyro --profile bf_ab12cd34 --machine bfm_...
 pyro --profile bf_ab12cd34 --machine bfm_... --openrouter-key sk-or-v1-... --openrouter-profile bf_ab12cd34
+pyro --profile bf_ab12cd34 --machine bfm_... --longwire-key lw_mk_... --longwire-profile bf_ab12cd34
 pyro install --profile bf_ab12cd34 --machine bfm_...
 pyro uninstall
 ```
@@ -156,7 +160,7 @@ total), and the same six counters split out per CLI and model.
 Total token counts are `input + cache_read + cache_write + output`. Reasoning
 tokens are reported separately but are informational only and never added
 into the total, since providers already include them in the output count.
-OpenRouter imports use the same definition.
+OpenRouter and longwire imports use the same definition.
 
 ## OpenRouter Usage
 
@@ -184,6 +188,43 @@ OpenRouter data is stored separately from local machine inference data and is
 deduplicated by target profile, OpenRouter key fingerprint, and day. If the same
 key is synced from multiple machines or from both Pyro and the dashboard, the
 same daily rows are updated instead of added twice.
+
+## longwire Usage
+
+[longwire](https://longwire.ai) is a private inference router: you run models
+on your own machines and call them through an OpenAI-compatible API. Burnfolio
+imports the tokens your longwire account consumed with a read-only
+**management key** (`lw_mk_…`), created in longwire under API Keys → Management
+keys (<https://longwire.ai/keys>). Management keys can't run inference.
+Inference keys (`lw_sk_…`) are rejected.
+
+Connect the key in the Burnfolio dashboard, either on your personal profile or on
+an organization's management page. Burnfolio validates it, stores it encrypted,
+backfills everything since 2026-01-01, then re-fetches the last week every hour,
+because a request counts on the day it started but is logged when it finishes.
+If longwire rejects the key (revoked or expired, IP-locked, or the account is
+suspended), the connection shows why and pauses until you reconnect or press
+**Sync now** after fixing it. Rate-limited syncs back off and retry later.
+
+To keep the key on your machine instead, let pyro read usage locally and
+upload only daily totals and a SHA-256 fingerprint of the key:
+
+```sh
+pyro install \
+  --profile <account-or-username> \
+  --machine <machine-token> \
+  --longwire-key <longwire-management-key> \
+  --longwire-profile <account-or-org>
+
+pyro
+```
+
+longwire reports requests, prompt tokens, and completion tokens per UTC day,
+overall and per model. They map to Burnfolio's records, input, and output.
+longwire doesn't track cache or reasoning tokens, so those are zero and
+total = input + output. Model names are trimmed and lowercased. Rows are stored
+separately and deduplicated by target profile, key fingerprint, and day,
+like OpenRouter. In tool breakdowns, longwire usage appears as `longwire`.
 
 ## Hosted Flow
 

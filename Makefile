@@ -5,6 +5,7 @@ build:
 
 test:
 	go test ./...
+	node --test worker/test/*.test.mjs
 
 install:
 	go install ./cmd/pyro

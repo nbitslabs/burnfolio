@@ -17,5 +17,9 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - run: node --check worker/index.js
+      - run: node --test worker/test/*.test.mjs
       - run: bash -n install.sh uninstall.sh

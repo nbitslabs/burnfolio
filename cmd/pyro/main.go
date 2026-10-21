@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nbitslabs/burnfolio/internal/longwire"
 	"github.com/nbitslabs/burnfolio/internal/openrouter"
 	"github.com/nbitslabs/burnfolio/internal/usage"
 )
@@ -34,6 +35,9 @@ type config struct {
 	OpenRouterKey     string `json:"openrouter_key,omitempty"`
 	OpenRouterProfile string `json:"openrouter_profile,omitempty"`
 	OpenRouterSince   string `json:"openrouter_since,omitempty"`
+	LongwireKey       string `json:"longwire_key,omitempty"`
+	LongwireProfile   string `json:"longwire_profile,omitempty"`
+	LongwireSince     string `json:"longwire_since,omitempty"`
 }
 
 func main() {
@@ -76,6 +80,9 @@ func main() {
 		openRouterKey     string
 		openRouterProfile string
 		openRouterSince   string
+		longwireKey       string
+		longwireProfile   string
+		longwireSince     string
 	)
 
 	defaultHome, err := os.UserHomeDir()
@@ -93,6 +100,9 @@ func main() {
 	flag.StringVar(&openRouterKey, "openrouter-key", "", "OpenRouter management key for local usage import")
 	flag.StringVar(&openRouterProfile, "openrouter-profile", "", "Burnfolio profile or org for OpenRouter usage")
 	flag.StringVar(&openRouterSince, "openrouter-since", "", "first OpenRouter usage date to import, YYYY-MM-DD")
+	flag.StringVar(&longwireKey, "longwire-key", "", "longwire management key (lw_mk_...) for local usage import")
+	flag.StringVar(&longwireProfile, "longwire-profile", "", "Burnfolio profile or org for longwire usage")
+	flag.StringVar(&longwireSince, "longwire-since", "", "first longwire usage date to import, YYYY-MM-DD")
 	flag.BoolVar(&noSync, "no-sync", false, "collect and print only; do not sync even when configured")
 	flag.BoolVar(&noSync, "no-run", false, "alias for -no-sync")
 	flag.Parse()
@@ -124,6 +134,15 @@ func main() {
 	}
 	if openRouterSince == "" {
 		openRouterSince = valueOr(cfg.OpenRouterSince, "2020-01-01")
+	}
+	if longwireKey == "" {
+		longwireKey = cfg.LongwireKey
+	}
+	if longwireProfile == "" {
+		longwireProfile = valueOr(cfg.LongwireProfile, profile)
+	}
+	if longwireSince == "" {
+		longwireSince = valueOr(cfg.LongwireSince, longwire.Since)
 	}
 
 	selected := usage.ParseProviderList(providers)
@@ -200,6 +219,21 @@ func main() {
 			_ = saveConfig(defaultHome, cfg)
 			fmt.Printf("Synced %d OpenRouter days to %s for %s.\n", orResult.UpsertedDays, strings.TrimRight(server, "/"), openRouterProfile)
 		}
+		if strings.TrimSpace(longwireKey) != "" {
+			lwResult, err := syncLongwireUsage(context.Background(), server, longwireProfile, machine, longwireKey, longwireSince)
+			if err != nil {
+				cfg.LastSyncStatus = "failed longwire: " + err.Error()
+				_ = saveConfig(defaultHome, cfg)
+				fmt.Fprintf(os.Stderr, "longwire sync failed: %v\n", err)
+				os.Exit(1)
+			}
+			cfg.LongwireKey = strings.TrimSpace(longwireKey)
+			cfg.LongwireProfile = strings.TrimSpace(longwireProfile)
+			cfg.LongwireSince = strings.TrimSpace(longwireSince)
+			cfg.LastSyncStatus += fmt.Sprintf("; longwire: %d days", lwResult.UpsertedDays)
+			_ = saveConfig(defaultHome, cfg)
+			fmt.Printf("Synced %d longwire days to %s for %s.\n", lwResult.UpsertedDays, strings.TrimRight(server, "/"), longwireProfile)
+		}
 	}
 
 	if len(report.Warnings) > 0 {
@@ -221,6 +255,12 @@ type openRouterPayload struct {
 	Profile           string           `json:"profile"`
 	OpenRouterKeyHash string           `json:"openrouter_key_hash"`
 	Days              []openrouter.Day `json:"days"`
+}
+
+type longwirePayload struct {
+	Profile         string         `json:"profile"`
+	LongwireKeyHash string         `json:"longwire_key_hash"`
+	Days            []longwire.Day `json:"days"`
 }
 
 type syncResult struct {
@@ -301,11 +341,38 @@ func syncOpenRouterUsage(ctx context.Context, server string, profile string, mac
 		OpenRouterKeyHash: openrouter.KeyHash(key),
 		Days:              days,
 	}
+	return postRouterUsage(ctx, strings.TrimRight(server, "/")+"/api/openrouter/ingest", machineToken, payload)
+}
+
+// syncLongwireUsage reads longwire usage locally with the management key and
+// uploads daily totals; only the key's SHA-256 fingerprint leaves the machine.
+func syncLongwireUsage(ctx context.Context, server string, profile string, machineToken string, key string, since string) (syncResult, error) {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return syncResult{}, fmt.Errorf("longwire profile is required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	days, warnings, err := longwire.Client{Key: key}.DailyUsage(ctx, since, time.Now().UTC())
+	if err != nil {
+		return syncResult{}, err
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", strings.TrimSpace(w))
+	}
+	payload := longwirePayload{
+		Profile:         profile,
+		LongwireKeyHash: longwire.KeyHash(key),
+		Days:            days,
+	}
+	return postRouterUsage(ctx, strings.TrimRight(server, "/")+"/api/longwire/ingest", machineToken, payload)
+}
+
+func postRouterUsage(ctx context.Context, endpoint string, machineToken string, payload any) (syncResult, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return syncResult{}, err
 	}
-	endpoint := strings.TrimRight(server, "/") + "/api/openrouter/ingest"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return syncResult{}, err
@@ -346,6 +413,9 @@ func installCmd(args []string) error {
 	openRouterKey := fs.String("openrouter-key", cfg.OpenRouterKey, "OpenRouter management key")
 	openRouterProfile := fs.String("openrouter-profile", cfg.OpenRouterProfile, "Burnfolio profile or org for OpenRouter usage")
 	openRouterSince := fs.String("openrouter-since", valueOr(cfg.OpenRouterSince, "2020-01-01"), "first OpenRouter usage date")
+	longwireKey := fs.String("longwire-key", cfg.LongwireKey, "longwire management key")
+	longwireProfile := fs.String("longwire-profile", cfg.LongwireProfile, "Burnfolio profile or org for longwire usage")
+	longwireSince := fs.String("longwire-since", valueOr(cfg.LongwireSince, longwire.Since), "first longwire usage date")
 	installDir := fs.String("install-dir", cfg.InstallDir, "install directory")
 	schedule := fs.String("schedule", "", "recorded schedule")
 	if err := fs.Parse(args); err != nil {
@@ -358,6 +428,14 @@ func installCmd(args []string) error {
 	cfg.OpenRouterKey = strings.TrimSpace(*openRouterKey)
 	cfg.OpenRouterProfile = strings.TrimSpace(*openRouterProfile)
 	cfg.OpenRouterSince = strings.TrimSpace(*openRouterSince)
+	cfg.LongwireKey = strings.TrimSpace(*longwireKey)
+	cfg.LongwireProfile = strings.TrimSpace(*longwireProfile)
+	cfg.LongwireSince = strings.TrimSpace(*longwireSince)
+	if cfg.LongwireKey != "" {
+		if err := longwire.CheckKey(cfg.LongwireKey); err != nil {
+			return err
+		}
+	}
 	cfg.InstallDir = strings.TrimSpace(*installDir)
 	cfg.Installed = true
 	cfg.UninstalledAt = ""
@@ -425,6 +503,9 @@ func statusCmd(args []string) error {
 	fmt.Printf("openrouter_key: %s\n", masked(cfg.OpenRouterKey))
 	fmt.Printf("openrouter_profile: %s\n", valueOr(cfg.OpenRouterProfile, "(not configured)"))
 	fmt.Printf("openrouter_since: %s\n", valueOr(cfg.OpenRouterSince, "2020-01-01"))
+	fmt.Printf("longwire_key: %s\n", masked(cfg.LongwireKey))
+	fmt.Printf("longwire_profile: %s\n", valueOr(cfg.LongwireProfile, "(not configured)"))
+	fmt.Printf("longwire_since: %s\n", valueOr(cfg.LongwireSince, longwire.Since))
 	if cfg.LastSyncAt != "" {
 		fmt.Printf("last_sync: %s %s\n", cfg.LastSyncAt, cfg.LastSyncStatus)
 	}

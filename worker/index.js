@@ -5,13 +5,31 @@ const MAX_SYNC_DAYS = 3000;
 const MAX_TOKEN_FIELD = 1_000_000_000_000;
 const MAX_RECORDS_PER_DAY = 1_000_000;
 const MAX_SOURCE_ROWS_PER_DAY = 200;
-const LATEST_PYRO_VERSION = "v0.1.4";
+const LATEST_PYRO_VERSION = "v0.1.5";
 
 const MIN_INGEST_DATE = "2020-01-01";
 const DEFAULT_MAX_DAILY_TOKENS_PER_SOURCE = 100_000_000_000;
 const OPENROUTER_ANALYTICS_URL = "https://openrouter.ai/api/v1/analytics/query";
 const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
 const OPENROUTER_SYNC_SINCE = "2020-01-01";
+const LONGWIRE_API_URL = "https://longwire.ai";
+// longwire launched in 2026; a full backfill walks 366-day windows from here.
+const LONGWIRE_SYNC_SINCE = "2026-01-01";
+const LONGWIRE_WINDOW_DAYS = 366;
+// Requests count on the day they started but are logged when they finish, so
+// each incremental sync re-fetches this many days before the last sync.
+const LONGWIRE_RESYNC_DAYS = 7;
+const LONGWIRE_TIMEOUT_MS = 20_000;
+const LONGWIRE_MIN_BACKOFF_SECONDS = 15 * 60;
+const LONGWIRE_MAX_BACKOFF_SECONDS = 6 * 60 * 60;
+
+// Account-level router sources share one table layout (migrations 0010, 0014,
+// 0017); the write path takes one of these descriptors. Names are constants,
+// never user input, so interpolating them into SQL is safe.
+const ROUTER_TABLES = {
+  openrouter: { name: "openrouter", usage: "openrouter_daily_usage", models: "openrouter_daily_model_usage", connections: "openrouter_connections", keyColumn: "openrouter_key_hash" },
+  longwire: { name: "longwire", usage: "longwire_daily_usage", models: "longwire_daily_model_usage", connections: "longwire_connections", keyColumn: "longwire_key_hash" },
+};
 const RESERVED_HANDLES = new Set([
   "app",
   "signup",
@@ -61,6 +79,7 @@ export default {
   },
   async scheduled(event, env, ctx) {
     ctx.waitUntil(syncDueOpenRouterConnections(env));
+    ctx.waitUntil(syncDueLongwireConnections(env));
     ctx.waitUntil(cleanupExpiredRecords(env));
   },
 };
@@ -112,6 +131,10 @@ async function route(request, env) {
   if (path === "/api/openrouter/connections" && request.method === "POST") return connectOpenRouterRoute(request, env);
   if (path.match(/^\/api\/openrouter\/connections\/[^/]+$/) && request.method === "DELETE") return deleteOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[4]));
   if (path.match(/^\/api\/openrouter\/connections\/[^/]+\/sync$/) && request.method === "POST") return syncOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[4]));
+  if (path === "/api/longwire/ingest" && request.method === "POST") return ingestLongwire(request, env);
+  if (path === "/api/longwire/connections" && request.method === "POST") return connectLongwireRoute(request, env);
+  if (path.match(/^\/api\/longwire\/connections\/[^/]+$/) && request.method === "DELETE") return deleteLongwireConnectionRoute(request, env, decodeURIComponent(path.split("/")[4]));
+  if (path.match(/^\/api\/longwire\/connections\/[^/]+\/sync$/) && request.method === "POST") return syncLongwireConnectionRoute(request, env, decodeURIComponent(path.split("/")[4]));
   if (path === "/api/machines" && request.method === "POST") return createMachineRoute(request, env);
   if (path.match(/^\/api\/machines\/[^/]+\/token$/) && request.method === "POST") return rotateMachineTokenRoute(request, env, decodeURIComponent(path.split("/")[3]));
   if (path === "/api/orgs" && request.method === "POST") return createOrgRoute(request, env);
@@ -119,6 +142,9 @@ async function route(request, env) {
   if (path.match(/^\/api\/orgs\/[^/]+\/openrouter\/connections$/) && request.method === "POST") return connectOpenRouterRoute(request, env, path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/openrouter\/connections\/[^/]+$/) && request.method === "DELETE") return deleteOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[6]), path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/openrouter\/connections\/[^/]+\/sync$/) && request.method === "POST") return syncOpenRouterConnectionRoute(request, env, decodeURIComponent(path.split("/")[6]), path.split("/")[3]);
+  if (path.match(/^\/api\/orgs\/[^/]+\/longwire\/connections$/) && request.method === "POST") return connectLongwireRoute(request, env, path.split("/")[3]);
+  if (path.match(/^\/api\/orgs\/[^/]+\/longwire\/connections\/[^/]+$/) && request.method === "DELETE") return deleteLongwireConnectionRoute(request, env, decodeURIComponent(path.split("/")[6]), path.split("/")[3]);
+  if (path.match(/^\/api\/orgs\/[^/]+\/longwire\/connections\/[^/]+\/sync$/) && request.method === "POST") return syncLongwireConnectionRoute(request, env, decodeURIComponent(path.split("/")[6]), path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/members$/) && request.method === "POST") return addOrgMemberRoute(request, env, path.split("/")[3]);
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "PATCH") return updateOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
   if (path.match(/^\/api\/orgs\/[^/]+\/members\/[^/]+$/) && request.method === "DELETE") return removeOrgMemberRoute(request, env, path.split("/")[3], decodeURIComponent(path.split("/")[5]));
@@ -403,6 +429,31 @@ async function exportOpenRouterConnections(env, userID, accountID) {
   return rows.results || [];
 }
 
+async function exportLongwireUsage(env, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT longwire_key_hash, date_utc, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at
+    FROM longwire_daily_usage WHERE account_id = ? ORDER BY date_utc
+  `).bind(accountID).all();
+  return rows.results || [];
+}
+
+async function exportLongwireModelUsage(env, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT longwire_key_hash, date_utc, model, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at
+    FROM longwire_daily_model_usage WHERE account_id = ? ORDER BY date_utc, model
+  `).bind(accountID).all();
+  return rows.results || [];
+}
+
+// Same scoping as exportOpenRouterConnections.
+async function exportLongwireConnections(env, userID, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT longwire_key_hash, label, status, last_sync_at, last_error, created_at, updated_at
+    FROM longwire_connections WHERE owner_user_id = ? OR account_id = ?
+  `).bind(userID, accountID).all();
+  return rows.results || [];
+}
+
 async function exportMemberships(env, userID) {
   const rows = await env.DB.prepare(`
     SELECT a.account_number, h.handle, m.role, m.status, m.created_at
@@ -416,7 +467,7 @@ async function exportMemberships(env, userID) {
 
 async function buildUserExport(env, user) {
   const account = await accountView(env, user.id);
-  const [emails, machines, dailyUsage, dailySourceUsage, orUsage, orModelUsage, orConnections, memberships] = await Promise.all([
+  const [emails, machines, dailyUsage, dailySourceUsage, orUsage, orModelUsage, orConnections, lwUsage, lwModelUsage, lwConnections, memberships] = await Promise.all([
     exportEmails(env, user.id),
     exportMachines(env, user.id),
     exportDailyMachineUsage(env, user.id),
@@ -424,6 +475,9 @@ async function buildUserExport(env, user) {
     exportOpenRouterUsage(env, account.id),
     exportOpenRouterModelUsage(env, account.id),
     exportOpenRouterConnections(env, user.id, account.id),
+    exportLongwireUsage(env, account.id),
+    exportLongwireModelUsage(env, account.id),
+    exportLongwireConnections(env, user.id, account.id),
     exportMemberships(env, user.id),
   ]);
   return {
@@ -448,6 +502,9 @@ async function buildUserExport(env, user) {
     openrouter_daily_usage: orUsage,
     openrouter_daily_model_usage: orModelUsage,
     openrouter_connections: orConnections,
+    longwire_daily_usage: lwUsage,
+    longwire_daily_model_usage: lwModelUsage,
+    longwire_connections: lwConnections,
     org_memberships: memberships,
   };
 }
@@ -503,6 +560,9 @@ async function deleteAccountRoute(request, env) {
     env.DB.prepare("DELETE FROM openrouter_daily_model_usage WHERE account_id = ?").bind(account.id),
     env.DB.prepare("DELETE FROM openrouter_daily_usage WHERE account_id = ?").bind(account.id),
     env.DB.prepare("DELETE FROM openrouter_connections WHERE owner_user_id = ? OR account_id = ?").bind(user.id, account.id),
+    env.DB.prepare("DELETE FROM longwire_daily_model_usage WHERE account_id = ?").bind(account.id),
+    env.DB.prepare("DELETE FROM longwire_daily_usage WHERE account_id = ?").bind(account.id),
+    env.DB.prepare("DELETE FROM longwire_connections WHERE owner_user_id = ? OR account_id = ?").bind(user.id, account.id),
     env.DB.prepare("DELETE FROM memberships WHERE user_id = ?").bind(user.id),
     env.DB.prepare("DELETE FROM account_badges WHERE account_id = ?").bind(account.id),
     env.DB.prepare("DELETE FROM handles WHERE account_id = ?").bind(account.id),
@@ -600,8 +660,8 @@ async function readGlobalStats(env) {
       UNION ALL
       SELECT date_utc, MIN(total_tokens, ?) AS total_tokens FROM (
         SELECT date_utc, MAX(total_tokens) AS total_tokens
-        FROM openrouter_daily_usage
-        GROUP BY openrouter_key_hash, date_utc
+        FROM router_daily_usage
+        GROUP BY source_key, date_utc
       )
     )
     WHERE date_utc BETWEEN ? AND ?
@@ -615,8 +675,8 @@ async function readGlobalStats(env) {
       UNION ALL
       SELECT MIN(total_tokens, ?) AS total_tokens FROM (
         SELECT MAX(total_tokens) AS total_tokens
-        FROM openrouter_daily_usage
-        GROUP BY openrouter_key_hash, date_utc
+        FROM router_daily_usage
+        GROUP BY source_key, date_utc
       )
     )
   `).bind(clamp, clamp).first();
@@ -704,7 +764,7 @@ async function platformStats(env) {
     SELECT
       SUM(CASE WHEN a.kind = 'user' AND (
         EXISTS (SELECT 1 FROM daily_machine_usage d WHERE d.user_id = a.id)
-        OR EXISTS (SELECT 1 FROM openrouter_daily_usage o WHERE o.account_id = a.id)
+        OR EXISTS (SELECT 1 FROM router_daily_usage o WHERE o.account_id = a.id)
       ) THEN 1 ELSE 0 END) AS users,
       SUM(CASE WHEN a.kind = 'org' THEN 1 ELSE 0 END) AS orgs
     FROM accounts a
@@ -1054,12 +1114,22 @@ async function ingest(request, env) {
 }
 
 async function ingestOpenRouter(request, env) {
+  return ingestRouterUsage(request, env, ROUTER_TABLES.openrouter);
+}
+
+async function ingestLongwire(request, env) {
+  return ingestRouterUsage(request, env, ROUTER_TABLES.longwire);
+}
+
+// pyro uploads router usage it read locally with the user's key; only the
+// key's SHA-256 fingerprint and daily totals reach the server.
+async function ingestRouterUsage(request, env, tables) {
   const token = bearerToken(request);
   if (!token) return json({ error: "missing_machine_token" }, 401);
   const tokenHash = await sha256(token);
   const limited = await rateLimitChecks(request, env, [
-    [await rateKey("openrouter-ingest:ip", clientIP(request)), 120, 60],
-    [`openrouter-ingest:token:${tokenHash.slice(0, 32)}`, 120, 60],
+    [await rateKey(`${tables.name}-ingest:ip`, clientIP(request)), 120, 60],
+    [`${tables.name}-ingest:token:${tokenHash.slice(0, 32)}`, 120, 60],
   ]);
   if (limited) return limited;
   const machine = await env.DB.prepare("SELECT id, user_id, org_id FROM machines WHERE token_hash = ?").bind(tokenHash).first();
@@ -1067,9 +1137,9 @@ async function ingestOpenRouter(request, env) {
   const body = await readBody(request);
   const account = await resolveAccount(env, String(body.profile || ""));
   if (!account || !(await canUploadOpenRouterToAccount(env, machine.user_id, account))) return json({ error: "profile_machine_mismatch" }, 403);
-  const sourceHash = cleanOpenRouterHash(body.openrouter_key_hash || body.source_hash);
-  if (!sourceHash) return json({ error: "invalid_openrouter_source" }, 400);
-  const result = await upsertOpenRouterDays(env, {
+  const sourceHash = cleanOpenRouterHash(body[tables.keyColumn] || body.source_hash);
+  if (!sourceHash) return json({ error: `invalid_${tables.name}_source` }, 400);
+  const result = await upsertRouterDays(env, tables, {
     accountID: account.id,
     keyHash: sourceHash,
     days: Array.isArray(body.days) ? body.days : [],
@@ -1095,7 +1165,7 @@ async function connectOpenRouterRoute(request, env, orgRef = "") {
     [await rateKey("openrouter-connect:user", user.id), 20, 3600],
   ]);
   if (limited) return limited;
-  const target = await openRouterTargetAccount(env, user.id, orgRef);
+  const target = await routerTargetAccount(env, user.id, orgRef);
   if (target.error) return json({ error: target.error }, target.status || 400);
   const body = await readBody(request);
   const key = cleanOpenRouterKey(body.key || body.openrouter_key);
@@ -1130,7 +1200,7 @@ async function deleteOpenRouterConnectionRoute(request, env, connectionID, orgRe
   if (!user) return json({ error: "unauthorized" }, 401);
   const connection = await openRouterConnectionByID(env, connectionID);
   if (!connection) return json({ error: "openrouter_not_found" }, 404);
-  const allowed = await canManageOpenRouterConnection(env, user.id, connection, orgRef);
+  const allowed = await canManageRouterConnection(env, user.id, connection, orgRef);
   if (allowed.error) return json({ error: allowed.error }, allowed.status || 403);
   await env.DB.prepare("DELETE FROM openrouter_connections WHERE id = ?").bind(connection.id).run();
   return json({ ok: true });
@@ -1141,7 +1211,7 @@ async function syncOpenRouterConnectionRoute(request, env, connectionID, orgRef 
   if (!user) return json({ error: "unauthorized" }, 401);
   const connection = await openRouterConnectionByID(env, connectionID);
   if (!connection) return json({ error: "openrouter_not_found" }, 404);
-  const allowed = await canManageOpenRouterConnection(env, user.id, connection, orgRef);
+  const allowed = await canManageRouterConnection(env, user.id, connection, orgRef);
   if (allowed.error) return json({ error: allowed.error }, allowed.status || 403);
   const limited = await rateLimitChecks(request, env, [
     [await rateKey("openrouter-sync:user", user.id), 30, 3600],
@@ -1152,7 +1222,7 @@ async function syncOpenRouterConnectionRoute(request, env, connectionID, orgRef 
   return json({ connection: publicOpenRouterConnection(connection, sync), sync });
 }
 
-async function openRouterTargetAccount(env, userID, orgRef = "") {
+async function routerTargetAccount(env, userID, orgRef = "") {
   if (!orgRef) return { account: await accountView(env, userID) };
   const org = await resolveAccount(env, orgRef);
   if (!org || org.kind !== "org") return { error: "org_not_found", status: 404 };
@@ -1161,7 +1231,7 @@ async function openRouterTargetAccount(env, userID, orgRef = "") {
   return { account: org };
 }
 
-async function canManageOpenRouterConnection(env, userID, connection, orgRef = "") {
+async function canManageRouterConnection(env, userID, connection, orgRef = "", notFound = "openrouter_not_found") {
   if (orgRef) {
     const org = await resolveAccount(env, orgRef);
     if (!org || org.id !== connection.account_id || org.kind !== "org") return { error: "org_not_found", status: 404 };
@@ -1169,13 +1239,17 @@ async function canManageOpenRouterConnection(env, userID, connection, orgRef = "
     return canManageOrg(role) ? {} : { error: "forbidden", status: 403 };
   }
   const account = await accountView(env, connection.account_id);
-  if (!account) return { error: "openrouter_not_found", status: 404 };
+  if (!account) return { error: notFound, status: 404 };
   if (account.kind === "user") return account.id === userID ? {} : { error: "forbidden", status: 403 };
   const role = await membershipRole(env, account.id, userID);
   return canManageOrg(role) ? {} : { error: "forbidden", status: 403 };
 }
 
-async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, machineID = null }) {
+async function upsertOpenRouterDays(env, args) {
+  return upsertRouterDays(env, ROUTER_TABLES.openrouter, args);
+}
+
+async function upsertRouterDays(env, tables, { accountID, keyHash, days, source, machineID = null }) {
   if (days.length > MAX_SYNC_DAYS) return { error: "too_many_days", status: 400 };
   const statements = [];
   let skippedDays = 0;
@@ -1202,10 +1276,10 @@ async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, mac
       continue;
     }
     statements.push(env.DB.prepare(`
-      INSERT INTO openrouter_daily_usage
-        (account_id, openrouter_key_hash, date_utc, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, records, source, updated_by_machine_id, updated_at)
+      INSERT INTO ${tables.usage}
+        (account_id, ${tables.keyColumn}, date_utc, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, records, source, updated_by_machine_id, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-      ON CONFLICT(account_id, openrouter_key_hash, date_utc) DO UPDATE SET
+      ON CONFLICT(account_id, ${tables.keyColumn}, date_utc) DO UPDATE SET
         input_tokens = excluded.input_tokens,
         cache_read_tokens = excluded.cache_read_tokens,
         cache_write_tokens = excluded.cache_write_tokens,
@@ -1239,19 +1313,19 @@ async function upsertOpenRouterDays(env, { accountID, keyHash, days, source, mac
         seen.add(model);
         modelRows.push({ model, records: mRecords, input: mInput, cacheRead: mCacheRead, cacheWrite: mCacheWrite, output: mOutput, reasoning: mReasoning, total: mTotal });
       }
-      statements.push(...openRouterModelReplaceStatements(env, accountID, keyHash, date, modelRows));
+      statements.push(...routerModelReplaceStatements(env, tables, accountID, keyHash, date, modelRows));
     }
   }
   if (statements.length) await env.DB.batch(statements);
   return { upsertedDays, skippedDays };
 }
 
-function openRouterModelReplaceStatements(env, accountID, keyHash, date, rows) {
-  const statements = [env.DB.prepare("DELETE FROM openrouter_daily_model_usage WHERE account_id = ? AND openrouter_key_hash = ? AND date_utc = ?").bind(accountID, keyHash, date)];
+function routerModelReplaceStatements(env, tables, accountID, keyHash, date, rows) {
+  const statements = [env.DB.prepare(`DELETE FROM ${tables.models} WHERE account_id = ? AND ${tables.keyColumn} = ? AND date_utc = ?`).bind(accountID, keyHash, date)];
   for (const row of rows) {
     statements.push(env.DB.prepare(`
-      INSERT INTO openrouter_daily_model_usage
-        (account_id, openrouter_key_hash, date_utc, model, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at)
+      INSERT INTO ${tables.models}
+        (account_id, ${tables.keyColumn}, date_utc, model, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     `).bind(accountID, keyHash, date, row.model, row.records, row.input, row.cacheRead, row.cacheWrite, row.output, row.reasoning, row.total));
   }
@@ -1347,7 +1421,7 @@ async function syncOpenRouterModelUsage(env, connection, key, start, end) {
     }
     const statements = [];
     for (const [date, rows] of byDate) {
-      statements.push(...openRouterModelReplaceStatements(env, connection.account_id, connection.openrouter_key_hash, date, rows));
+      statements.push(...routerModelReplaceStatements(env, ROUTER_TABLES.openrouter, connection.account_id, connection.openrouter_key_hash, date, rows));
     }
     if (statements.length) await env.DB.batch(statements);
   } catch (error) {
@@ -1559,6 +1633,426 @@ function publicOpenRouterConnection(connection, sync = {}) {
   };
 }
 
+// --- longwire --------------------------------------------------------------
+// https://longwire.ai: a private inference router. Read-only management keys
+// (lw_mk_…) expose the account's consumed-token usage per UTC day. Mirrors the
+// OpenRouter server-side flow; the differences are auth-failure handling
+// (401/403 park the connection until the user reconnects or syncs manually) and
+// 429 backoff via next_attempt_at.
+
+async function connectLongwireRoute(request, env, orgRef = "") {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("longwire-connect:user", user.id), 20, 3600],
+  ]);
+  if (limited) return limited;
+  const target = await routerTargetAccount(env, user.id, orgRef);
+  if (target.error) return json({ error: target.error }, target.status || 400);
+  const body = await readBody(request);
+  const rawKey = String(body.key || body.longwire_key || "").trim();
+  if (rawKey.startsWith("lw_sk_")) return json({ error: "longwire_inference_key", message: LONGWIRE_MESSAGES.longwire_inference_key }, 400);
+  const key = cleanLongwireKey(rawKey);
+  if (!key) return json({ error: "invalid_longwire_key", message: LONGWIRE_MESSAGES.invalid_longwire_key }, 400);
+  const customName = cleanLongwireName(body.name || body.label);
+  const details = await validateLongwireKey(env, key);
+  if (details.error) return json({ error: details.error.code, message: details.error.message }, longwireClientStatus(details.error));
+  const encrypted = await encryptStoredSecret(env, key);
+  if (encrypted.error) return json({ error: encrypted.error }, 500);
+  const keyHash = await sha256(key);
+  const id = crypto.randomUUID();
+  await env.DB.prepare(`
+    INSERT INTO longwire_connections
+      (id, account_id, owner_user_id, longwire_key_hash, key_ciphertext, key_nonce, label, status, needs_reconnect, next_attempt_at, last_error, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 0, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    ON CONFLICT(account_id, longwire_key_hash) DO UPDATE SET
+      owner_user_id = excluded.owner_user_id,
+      key_ciphertext = excluded.key_ciphertext,
+      key_nonce = excluded.key_nonce,
+      label = excluded.label,
+      status = 'active',
+      needs_reconnect = 0,
+      next_attempt_at = NULL,
+      last_error = NULL,
+      updated_at = excluded.updated_at
+  `).bind(id, target.account.id, user.id, keyHash, encrypted.ciphertext, encrypted.nonce, customName || details.label).run();
+  const connection = await longwireConnectionForKey(env, target.account.id, keyHash);
+  const sync = await syncLongwireConnection(env, connection, { full: true });
+  return json({ connection: publicLongwireConnection(connection, sync) });
+}
+
+async function deleteLongwireConnectionRoute(request, env, connectionID, orgRef = "") {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const connection = await longwireConnectionByID(env, connectionID);
+  if (!connection) return json({ error: "longwire_not_found" }, 404);
+  const allowed = await canManageRouterConnection(env, user.id, connection, orgRef, "longwire_not_found");
+  if (allowed.error) return json({ error: allowed.error }, allowed.status || 403);
+  await env.DB.prepare("DELETE FROM longwire_connections WHERE id = ?").bind(connection.id).run();
+  return json({ ok: true });
+}
+
+// Manual sync runs even when the connection is parked after an auth failure:
+// the user may have fixed the problem on longwire's side (e.g. lifted an IP
+// lock), and a success un-parks it.
+async function syncLongwireConnectionRoute(request, env, connectionID, orgRef = "") {
+  const user = await requireUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const connection = await longwireConnectionByID(env, connectionID);
+  if (!connection) return json({ error: "longwire_not_found" }, 404);
+  const allowed = await canManageRouterConnection(env, user.id, connection, orgRef, "longwire_not_found");
+  if (allowed.error) return json({ error: allowed.error }, allowed.status || 403);
+  const limited = await rateLimitChecks(request, env, [
+    [await rateKey("longwire-sync:user", user.id), 30, 3600],
+    [await rateKey("longwire-sync:connection", connection.id), 10, 3600],
+  ]);
+  if (limited) return limited;
+  const sync = await syncLongwireConnection(env, connection, { full: false });
+  if (sync.error) return json({ error: sync.error, message: sync.message, connection: publicLongwireConnection(connection, sync), sync }, longwireClientStatus({ code: sync.error, status: sync.status }));
+  return json({ connection: publicLongwireConnection(connection, sync), sync });
+}
+
+async function syncDueLongwireConnections(env) {
+  const rows = await env.DB.prepare(`
+    SELECT *
+    FROM longwire_connections
+    WHERE status != 'disabled'
+      AND needs_reconnect = 0
+      AND (next_attempt_at IS NULL OR next_attempt_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      AND (last_sync_at IS NULL OR last_sync_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-55 minutes'))
+    ORDER BY COALESCE(last_sync_at, '1970-01-01') ASC
+    LIMIT 25
+  `).all();
+  for (const connection of rows.results || []) {
+    try {
+      await syncLongwireConnection(env, connection, { full: false });
+    } catch (error) {
+      console.error("longwire scheduled sync failed", connection.id, error && error.message ? error.message : error);
+    }
+  }
+}
+
+async function syncLongwireConnection(env, connection, { full = false } = {}) {
+  const key = await decryptStoredSecret(env, connection.key_ciphertext, connection.key_nonce);
+  if (key.error) {
+    await markLongwireConnectionError(env, connection.id, { code: key.error, message: key.error });
+    return { error: key.error, message: key.error };
+  }
+  const { start, end } = longwireSyncRange(connection, { full });
+  const totals = await fetchLongwireUsage(env, key.value, start, end, { groupByModel: false });
+  if (totals.error) {
+    await markLongwireConnectionError(env, connection.id, totals.error);
+    return { error: totals.error.code, message: totals.error.message, status: totals.error.status };
+  }
+  const result = await upsertRouterDays(env, ROUTER_TABLES.longwire, {
+    accountID: connection.account_id,
+    keyHash: connection.longwire_key_hash,
+    days: longwireDayTotals(totals.rows),
+    source: "server",
+  });
+  if (result.error) {
+    await markLongwireConnectionError(env, connection.id, { code: result.error, message: result.error });
+    return { error: result.error, message: result.error };
+  }
+  const models = await syncLongwireModelUsage(env, connection, key.value, start, end);
+  if (models.error) {
+    // Day totals are stored; leave last_sync_at where it was so the next run
+    // re-covers this window and backfills the per-model rows.
+    await env.DB.prepare(`
+      UPDATE longwire_connections
+      SET status = 'active', needs_reconnect = 0, next_attempt_at = NULL, last_error = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE id = ?
+    `).bind(cleanText(`Day totals synced, but the per-model breakdown failed: ${models.error.message}`, 240), connection.id).run();
+  } else {
+    await env.DB.prepare(`
+      UPDATE longwire_connections
+      SET status = 'active', needs_reconnect = 0, next_attempt_at = NULL, last_sync_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_error = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE id = ?
+    `).bind(connection.id).run();
+  }
+  await awardBadgesForAccountID(env, connection.account_id);
+  return { ok: true, upserted_days: result.upsertedDays, skipped_days: result.skippedDays, models_synced: !models.error };
+}
+
+// Never throws: a per-model failure must not fail the day totals.
+async function syncLongwireModelUsage(env, connection, key, start, end) {
+  try {
+    const result = await fetchLongwireUsage(env, key, start, end, { groupByModel: true });
+    if (result.error) {
+      console.error("longwire model sync failed", connection.id, result.error.code);
+      return { error: result.error };
+    }
+    const statements = [];
+    for (const [date, rows] of longwireModelRowsByDate(result.rows)) {
+      statements.push(...routerModelReplaceStatements(env, ROUTER_TABLES.longwire, connection.account_id, connection.longwire_key_hash, date, rows));
+    }
+    for (let i = 0; i < statements.length; i += 500) await env.DB.batch(statements.slice(i, i + 500));
+    return {};
+  } catch (error) {
+    console.error("longwire model sync error", connection.id, error && error.message ? error.message : error);
+    return { error: { code: "longwire_unavailable", message: "unexpected error while storing model usage" } };
+  }
+}
+
+function longwireSyncRange(connection, { full = false } = {}) {
+  const end = todayUTCDate().toISOString().slice(0, 10);
+  let start = LONGWIRE_SYNC_SINCE;
+  if (!full && connection.last_sync_at) {
+    const resync = dateOffsetUTC(String(connection.last_sync_at).slice(0, 10), -LONGWIRE_RESYNC_DAYS);
+    if (resync > start) start = resync;
+  }
+  if (start > end) start = end;
+  return { start, end };
+}
+
+// Inclusive [start, end] windows of at most LONGWIRE_WINDOW_DAYS days, the
+// most the usage endpoint accepts per request.
+function longwireWindows(start, end) {
+  const windows = [];
+  const endDate = parseUTCDate(end);
+  let cursor = parseUTCDate(start);
+  if (!cursor || !endDate) return windows;
+  while (cursor <= endDate) {
+    const windowEnd = new Date(cursor);
+    windowEnd.setUTCDate(windowEnd.getUTCDate() + LONGWIRE_WINDOW_DAYS - 1);
+    const effectiveEnd = windowEnd < endDate ? windowEnd : endDate;
+    windows.push([cursor.toISOString().slice(0, 10), effectiveEnd.toISOString().slice(0, 10)]);
+    cursor = new Date(effectiveEnd);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return windows;
+}
+
+async function fetchLongwireUsage(env, key, start, end, { groupByModel = false } = {}) {
+  const rows = [];
+  for (const [windowStart, windowEnd] of longwireWindows(start, end)) {
+    const params = new URLSearchParams({ start: windowStart, end: windowEnd, tz: "UTC", view: "consumed" });
+    if (groupByModel) params.set("group_by", "model");
+    const result = await longwireRequest(env, key, `/v1/management/usage?${params}`);
+    if (result.error) return result;
+    if (!result.data || !Array.isArray(result.data.data)) {
+      return { error: { code: "longwire_unavailable", message: "longwire returned an unexpected usage response.", status: 502 } };
+    }
+    rows.push(...result.data.data);
+  }
+  return { rows };
+}
+
+// longwire doesn't track cache or reasoning tokens, so those stay 0 and
+// total = input + output (burnfolio's canonical total).
+function longwireUsageFields(row) {
+  const input = int(row && row.prompt_tokens);
+  const output = int(row && row.completion_tokens);
+  return { records: int(row && row.requests), input, output };
+}
+
+function longwireDayTotals(rows) {
+  const byDate = new Map();
+  for (const row of rows || []) {
+    const date = String((row && row.date) || "").slice(0, 10);
+    if (!validIngestDate(date)) continue;
+    const fields = longwireUsageFields(row);
+    const day = byDate.get(date) || { records: 0, input: 0, output: 0 };
+    day.records += fields.records;
+    day.input += fields.input;
+    day.output += fields.output;
+    byDate.set(date, day);
+  }
+  return [...byDate.entries()].map(([date, day]) => ({
+    date_utc: date,
+    records: day.records,
+    usage: { input: day.input, output: day.output, cache_read: 0, cache_write: 0, reasoning: 0, total: day.input + day.output },
+  }));
+}
+
+function normalizeRouterModel(value) {
+  return String(value || "").trim().toLowerCase().slice(0, 200);
+}
+
+// Rows arrive sorted by date then total_tokens desc. Model names are
+// normalized like OpenRouter's; names that collide after normalization (e.g.
+// "Qwen/Qwen3-8B" vs "qwen/qwen3-8b") are summed rather than dropped.
+function longwireModelRowsByDate(rows) {
+  const byDate = new Map();
+  for (const row of rows || []) {
+    const date = String((row && row.date) || "").slice(0, 10);
+    if (!validIngestDate(date)) continue;
+    const model = normalizeRouterModel(row.model);
+    if (!model) continue;
+    const fields = longwireUsageFields(row);
+    if (!byDate.has(date)) byDate.set(date, new Map());
+    const models = byDate.get(date);
+    const existing = models.get(model);
+    if (existing) {
+      existing.records += fields.records;
+      existing.input += fields.input;
+      existing.output += fields.output;
+      existing.total = existing.input + existing.output;
+      continue;
+    }
+    if (models.size >= MAX_SOURCE_ROWS_PER_DAY) continue;
+    models.set(model, { model, records: fields.records, input: fields.input, cacheRead: 0, cacheWrite: 0, output: fields.output, reasoning: 0, total: fields.input + fields.output });
+  }
+  const out = new Map();
+  for (const [date, models] of byDate) {
+    const list = [...models.values()].filter((m) => m.total <= MAX_TOKEN_FIELD && m.records <= MAX_RECORDS_PER_DAY);
+    out.set(date, list);
+  }
+  return out;
+}
+
+async function validateLongwireKey(env, key) {
+  const result = await longwireRequest(env, key, "/v1/management/key");
+  if (result.error) return result;
+  const details = result.data || {};
+  if (details.is_management_key !== true) {
+    return { error: { code: "longwire_management_key_required", message: LONGWIRE_MESSAGES.longwire_management_key_required, status: 403, auth: true } };
+  }
+  return { label: safeLongwireLabel(details.name) };
+}
+
+async function longwireRequest(env, key, path) {
+  const base = String((env && env.LONGWIRE_API_URL) || LONGWIRE_API_URL).replace(/\/+$/, "");
+  let res;
+  try {
+    res = await fetch(base + path, {
+      headers: { "Authorization": `Bearer ${key}`, "Accept": "application/json" },
+      signal: AbortSignal.timeout(LONGWIRE_TIMEOUT_MS),
+    });
+  } catch {
+    return { error: { code: "longwire_unavailable", message: "longwire could not be reached. Try again shortly.", status: 502 } };
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) return { error: longwireErrorInfo(res.status, data, res.headers.get("Retry-After")) };
+  return { data };
+}
+
+const LONGWIRE_MESSAGES = {
+  invalid_longwire_key: "Enter a longwire management key (it starts with lw_mk_).",
+  longwire_inference_key: "That's a longwire inference key (lw_sk_…). Burnfolio needs a read-only management key: create one in longwire under API Keys → Management keys.",
+  longwire_key_rejected: "longwire rejected this key: it may have been revoked or expired. Reconnect with a new management key.",
+  longwire_management_key_required: "longwire says this isn't a management key. Create one under API Keys → Management keys and reconnect.",
+  longwire_ip_not_allowed: "This key is IP-locked and Burnfolio's servers aren't on its allowlist. Remove the IP lock in longwire, then sync again.",
+  longwire_account_suspended: "The longwire account is suspended, so its usage can't be read.",
+  longwire_forbidden: "longwire refused this key.",
+  longwire_rate_limited: "longwire is rate limiting this key. Burnfolio will retry later.",
+  longwire_unavailable: "longwire usage could not be fetched right now.",
+};
+
+// Maps a longwire error response to { code, message, status, auth, retryAfter }.
+// auth = true means retrying won't help until the user acts (401/403).
+function longwireErrorInfo(status, data, retryAfterHeader = null) {
+  const upstream = data && data.error && data.error.message ? cleanText(data.error.message, 120) : "";
+  const lower = upstream.toLowerCase();
+  let code = "longwire_unavailable";
+  if (status === 401) code = "longwire_key_rejected";
+  else if (status === 403) {
+    if (lower.includes("inference") || lower.includes("management") || lower.includes("lw_sk")) code = "longwire_management_key_required";
+    else if (/\bip\b|allowlist|allow list|address/.test(lower)) code = "longwire_ip_not_allowed";
+    else if (lower.includes("suspend")) code = "longwire_account_suspended";
+    else code = "longwire_forbidden";
+  } else if (status === 429) code = "longwire_rate_limited";
+  const auth = status === 401 || status === 403;
+  let message = LONGWIRE_MESSAGES[code];
+  if (upstream && (auth || status === 400)) message = `${message} (longwire: ${upstream})`;
+  const info = { code, message: cleanText(message, 240), status, auth };
+  if (status === 429) info.retryAfter = longwireBackoffSeconds(retryAfterHeader);
+  return info;
+}
+
+function longwireBackoffSeconds(header) {
+  const seconds = Number(header);
+  const wanted = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : LONGWIRE_MIN_BACKOFF_SECONDS;
+  return Math.min(LONGWIRE_MAX_BACKOFF_SECONDS, Math.max(LONGWIRE_MIN_BACKOFF_SECONDS, wanted));
+}
+
+// What a dashboard request should answer with when longwire said no: key
+// problems are the user's to fix (400), throttling passes through (429), and
+// anything else is an upstream failure (502).
+function longwireClientStatus(error) {
+  if (!error) return 400;
+  if (error.status === 429 || error.code === "longwire_rate_limited") return 429;
+  if (error.auth || error.status === 400 || error.status === 401 || error.status === 403) return 400;
+  if (error.code === "openrouter_key_storage_not_configured" || error.code === "openrouter_key_decrypt_failed") return 500;
+  return 502;
+}
+
+async function markLongwireConnectionError(env, id, error) {
+  const message = cleanText(error.message || error.code, 240);
+  if (error.status === 429) {
+    await env.DB.prepare(`
+      UPDATE longwire_connections
+      SET status = 'error', last_error = ?, next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE id = ?
+    `).bind(message, `+${int(error.retryAfter) || LONGWIRE_MIN_BACKOFF_SECONDS} seconds`, id).run();
+    return;
+  }
+  await env.DB.prepare(`
+    UPDATE longwire_connections
+    SET status = 'error', last_error = ?, needs_reconnect = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE id = ?
+  `).bind(message, error.auth ? 1 : 0, id).run();
+}
+
+function cleanLongwireKey(value) {
+  value = String(value || "").trim();
+  if (!value || value.length > 240 || /\s/.test(value)) return "";
+  return value.startsWith("lw_mk_") ? value : "";
+}
+
+function safeLongwireLabel(value) {
+  value = cleanText(value || "longwire", 80);
+  if (!value || value.startsWith("lw_")) return "longwire";
+  return value;
+}
+
+function cleanLongwireName(value) {
+  const text = cleanText(value, 80);
+  if (!text || text.startsWith("lw_")) return "";
+  return text;
+}
+
+async function longwireConnectionByID(env, id) {
+  return env.DB.prepare(`
+    SELECT c.*, a.kind, a.account_number, h.handle, a.display_name
+    FROM longwire_connections c
+    JOIN accounts a ON a.id = c.account_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE c.id = ?
+  `).bind(id).first();
+}
+
+async function longwireConnectionForKey(env, accountID, keyHash) {
+  return env.DB.prepare(`
+    SELECT c.*, a.kind, a.account_number, h.handle, a.display_name
+    FROM longwire_connections c
+    JOIN accounts a ON a.id = c.account_id
+    LEFT JOIN handles h ON h.account_id = a.id
+    WHERE c.account_id = ? AND c.longwire_key_hash = ?
+  `).bind(accountID, keyHash).first();
+}
+
+async function longwireConnectionRows(env, accountID) {
+  const rows = await env.DB.prepare(`
+    SELECT id, label, status, needs_reconnect, last_sync_at, last_error, created_at
+    FROM longwire_connections
+    WHERE account_id = ?
+    ORDER BY created_at DESC
+  `).bind(accountID).all();
+  return rows.results || [];
+}
+
+function publicLongwireConnection(connection, sync = {}) {
+  return {
+    id: connection.id,
+    label: connection.label || "longwire",
+    status: sync.error ? "error" : connection.status || "active",
+    last_sync_at: sync.ok ? new Date().toISOString() : connection.last_sync_at || null,
+    last_error: sync.error ? sync.message || sync.error : connection.last_error || null,
+    sync,
+  };
+}
+
 // --- Badges ----------------------------------------------------------------
 // Computed on read from existing usage data — no new tables. Rarity tiers use
 // AI-flavored names but the underlying `tier` key stays common/uncommon/rare
@@ -1586,7 +2080,7 @@ const BADGE_DEFS = [
   { key: "weekend_warrior", name: "Weekend Warrior", tier: "common", description: "Shipping doesn't check the calendar.", requirement: "Be active on 10 Saturdays or Sundays (UTC).", check: (s) => s.weekendActiveDays >= 10 },
   { key: "open_book", name: "Open Book", tier: "common", description: "Alignment through transparency.", requirement: "Set a bio and at least one profile link.", check: (s) => s.hasBioAndLink },
   { key: "team_player", name: "Team Player", tier: "common", description: "Multi-agent systems work better with trust.", requirement: "Accept an organization membership.", check: (s) => s.hasActiveOrgMembership },
-  { key: "router", name: "The Router", tier: "common", description: "All roads lead through you.", requirement: "Sync any OpenRouter usage.", check: (s) => s.hasOpenRouterUsage },
+  { key: "router", name: "The Router", tier: "common", description: "All roads lead through you.", requirement: "Sync any OpenRouter or longwire usage.", check: (s) => s.hasRouterUsage },
 
   // --- Fine-Tune (uncommon) ---
   { key: "billion_token_brain", name: "Billion-Token Brain", tier: "uncommon", description: "Enough tokens to pretrain a very small, very confused model.", requirement: "Burn 1b lifetime tokens (input + cache + output).", check: (s) => s.lifetimeTokens >= 1_000_000_000 },
@@ -1676,7 +2170,7 @@ function badgeProgress(def, statsBundle) {
     case "weekend_warrior": return s.weekendActiveDays / 10;
     case "open_book": return s.hasBioAndLink ? 1 : 0;
     case "team_player": return s.hasActiveOrgMembership ? 1 : 0;
-    case "router": return s.hasOpenRouterUsage ? 1 : 0;
+    case "router": return s.hasRouterUsage ? 1 : 0;
     case "billion_token_brain": return s.lifetimeTokens / 1_000_000_000;
     case "epoch": return Math.max(s.currentStreak, s.longestStreak) / 30;
     case "overclocked": return s.bestDayTokens / 100_000_000;
@@ -1758,16 +2252,16 @@ function badgeCalendarStats(days) {
 }
 
 // Lifetime day-level component sums (input/cache-read/cache-write/output/
-// reasoning/records) plus whether the account has ever synced any OpenRouter
+// reasoning/records) plus whether the account has ever synced any router (OpenRouter/longwire)
 // usage — always available regardless of whether per-source segment tracking
 // exists. One UNION ALL CTE aggregated once, rather than paired scalar
 // subqueries per column (far fewer bind params to get wrong).
 async function badgeDayTotals(env, account) {
   if (account.kind === "org") {
     const row = await env.DB.prepare(`
-      WITH org_openrouter AS (
+      WITH org_router AS (
         SELECT o.input_tokens, o.cache_read_tokens, o.cache_write_tokens, o.output_tokens, o.reasoning_tokens, o.records
-        FROM openrouter_daily_usage o
+        FROM router_daily_usage o
         LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
         WHERE o.account_id = ? OR m.user_id IS NOT NULL
       ),
@@ -1777,7 +2271,7 @@ async function badgeDayTotals(env, account) {
         JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active'
         WHERE m.org_id = ?
         UNION ALL
-        SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, records FROM org_openrouter
+        SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, records FROM org_router
       )
       SELECT
         COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -1786,7 +2280,7 @@ async function badgeDayTotals(env, account) {
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
         COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
         COALESCE(SUM(records), 0) AS records,
-        EXISTS(SELECT 1 FROM org_openrouter) AS has_openrouter
+        EXISTS(SELECT 1 FROM org_router) AS has_router
       FROM combined
     `).bind(account.id, account.id, account.id).first();
     return badgeDayTotalsFromRow(row);
@@ -1799,7 +2293,7 @@ async function badgeDayTotals(env, account) {
       WHERE d.user_id = ? AND mm.org_id IS NULL
       UNION ALL
       SELECT input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, records
-      FROM openrouter_daily_usage WHERE account_id = ?
+      FROM router_daily_usage WHERE account_id = ?
     )
     SELECT
       COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -1808,7 +2302,7 @@ async function badgeDayTotals(env, account) {
       COALESCE(SUM(output_tokens), 0) AS output_tokens,
       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
       COALESCE(SUM(records), 0) AS records,
-      EXISTS(SELECT 1 FROM openrouter_daily_usage WHERE account_id = ?) AS has_openrouter
+      EXISTS(SELECT 1 FROM router_daily_usage WHERE account_id = ?) AS has_router
     FROM combined
   `).bind(account.id, account.id, account.id).first();
   return badgeDayTotalsFromRow(row);
@@ -1822,7 +2316,7 @@ function badgeDayTotalsFromRow(row) {
     outputTokens: int(row && row.output_tokens),
     reasoningTokens: int(row && row.reasoning_tokens),
     records: int(row && row.records),
-    hasOpenRouterUsage: Boolean(row && row.has_openrouter),
+    hasRouterUsage: Boolean(row && row.has_router),
   };
 }
 
@@ -1838,8 +2332,8 @@ async function badgeSegmentRows(env, account) {
         JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
         WHERE m.org_id = ?
         UNION ALL
-        SELECT 'openrouter' AS cli, o.model
-        FROM openrouter_daily_model_usage o
+        SELECT o.provider AS cli, o.model
+        FROM router_daily_model_usage o
         LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
         WHERE o.account_id = ? OR m.user_id IS NOT NULL
       )
@@ -1853,7 +2347,7 @@ async function badgeSegmentRows(env, account) {
       JOIN machines mm ON mm.id = s.machine_id
       WHERE s.user_id = ? AND mm.org_id IS NULL
       UNION ALL
-      SELECT 'openrouter' AS cli, model FROM openrouter_daily_model_usage WHERE account_id = ?
+      SELECT provider AS cli, model FROM router_daily_model_usage WHERE account_id = ?
     )
   `).bind(account.id, account.id).all();
   return rows.results || [];
@@ -1890,7 +2384,7 @@ async function badgeBundleFor(env, account, stats, total, days) {
     outputTokens: dayTotals.outputTokens,
     reasoningTokens: dayTotals.reasoningTokens,
     records: dayTotals.records,
-    hasOpenRouterUsage: dayTotals.hasOpenRouterUsage,
+    hasRouterUsage: dayTotals.hasRouterUsage,
     weekendActiveDays: calendar.weekendActiveDays,
     hasPerfectMonth: calendar.hasPerfectMonth,
     distinctActiveMonths: calendar.distinctActiveMonths,
@@ -2283,7 +2777,7 @@ async function userDays(env, userID) {
       WHERE d.user_id = ? AND mm.org_id IS NULL
       UNION ALL
       SELECT date_utc, MIN(total_tokens, ?) AS total_tokens
-      FROM openrouter_daily_usage
+      FROM router_daily_usage
       WHERE account_id = ?
     )
     GROUP BY date_utc
@@ -2295,12 +2789,12 @@ async function userDays(env, userID) {
 async function orgDays(env, orgID) {
   const clamp = dailyTokenClamp(env);
   const rows = await env.DB.prepare(`
-    WITH openrouter_rows AS (
-      SELECT o.date_utc, o.openrouter_key_hash, MAX(o.total_tokens) AS total_tokens
-      FROM openrouter_daily_usage o
+    WITH router_rows AS (
+      SELECT o.date_utc, o.source_key, MAX(o.total_tokens) AS total_tokens
+      FROM router_daily_usage o
       LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
       WHERE o.account_id = ? OR m.user_id IS NOT NULL
-      GROUP BY o.date_utc, o.openrouter_key_hash
+      GROUP BY o.date_utc, o.source_key
     )
     SELECT date_utc, SUM(total_tokens) AS total_tokens
     FROM (
@@ -2310,7 +2804,7 @@ async function orgDays(env, orgID) {
       WHERE m.org_id = ?
       UNION ALL
       SELECT date_utc, MIN(total_tokens, ?) AS total_tokens
-      FROM openrouter_rows
+      FROM router_rows
     )
     GROUP BY date_utc
     ORDER BY date_utc
@@ -2332,8 +2826,8 @@ async function userSourceRows(env, userID, sinceDate) {
       JOIN machines mm ON mm.id = s.machine_id
       WHERE s.user_id = ? AND mm.org_id IS NULL AND s.date_utc >= ?
       UNION ALL
-      SELECT 'openrouter' AS cli, o.model, o.total_tokens
-      FROM openrouter_daily_model_usage o
+      SELECT o.provider AS cli, o.model, o.total_tokens
+      FROM router_daily_model_usage o
       WHERE o.account_id = ? AND o.date_utc >= ?
     )
     GROUP BY cli, model
@@ -2343,12 +2837,12 @@ async function userSourceRows(env, userID, sinceDate) {
 
 async function orgSourceRows(env, orgID, sinceDate) {
   const rows = await env.DB.prepare(`
-    WITH openrouter_model_rows AS (
-      SELECT o.date_utc, o.openrouter_key_hash, o.model, MAX(o.total_tokens) AS total_tokens
-      FROM openrouter_daily_model_usage o
+    WITH router_model_rows AS (
+      SELECT o.date_utc, o.provider, o.source_key, o.model, MAX(o.total_tokens) AS total_tokens
+      FROM router_daily_model_usage o
       LEFT JOIN memberships m ON m.user_id = o.account_id AND m.org_id = ? AND m.status = 'active'
       WHERE (o.account_id = ? OR m.user_id IS NOT NULL) AND o.date_utc >= ?
-      GROUP BY o.date_utc, o.openrouter_key_hash, o.model
+      GROUP BY o.date_utc, o.provider, o.source_key, o.model
     )
     SELECT cli, model, SUM(total_tokens) AS total_tokens
     FROM (
@@ -2357,8 +2851,8 @@ async function orgSourceRows(env, orgID, sinceDate) {
       JOIN memberships m ON m.user_id = s.user_id AND m.status = 'active'
       WHERE m.org_id = ? AND s.date_utc >= ?
       UNION ALL
-      SELECT 'openrouter' AS cli, model, total_tokens
-      FROM openrouter_model_rows
+      SELECT provider AS cli, model, total_tokens
+      FROM router_model_rows
     )
     GROUP BY cli, model
   `).bind(orgID, orgID, sinceDate, orgID, sinceDate).all();
@@ -2385,7 +2879,7 @@ async function userDailyComponentRows(env, userID) {
       WHERE d.user_id = ? AND mm.org_id IS NULL
       UNION ALL
       SELECT date_utc, records, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens
-      FROM openrouter_daily_usage
+      FROM router_daily_usage
       WHERE account_id = ?
     )
     GROUP BY date_utc
@@ -2413,8 +2907,8 @@ async function userDailySourceRows(env, userID) {
       JOIN machines mm ON mm.id = s.machine_id
       WHERE s.user_id = ? AND mm.org_id IS NULL
       UNION ALL
-      SELECT o.date_utc, 'openrouter' AS cli, o.model, o.records, o.input_tokens, o.cache_read_tokens, o.cache_write_tokens, o.output_tokens, o.reasoning_tokens, o.total_tokens
-      FROM openrouter_daily_model_usage o
+      SELECT o.date_utc, o.provider AS cli, o.model, o.records, o.input_tokens, o.cache_read_tokens, o.cache_write_tokens, o.output_tokens, o.reasoning_tokens, o.total_tokens
+      FROM router_daily_model_usage o
       WHERE o.account_id = ?
     )
     GROUP BY date_utc, cli, model
@@ -2481,9 +2975,9 @@ async function rankedAccountRows(env, range) {
       JOIN machines mm ON mm.id = d.machine_id
       WHERE mm.org_id IS NULL AND d.date_utc >= ?
     ),
-    personal_openrouter AS (
+    personal_router AS (
       SELECT o.account_id, MIN(o.total_tokens, ?) AS total_tokens
-      FROM openrouter_daily_usage o
+      FROM router_daily_usage o
       JOIN accounts ua ON ua.id = o.account_id AND ua.kind = 'user'
       WHERE o.date_utc >= ?
     ),
@@ -2492,7 +2986,7 @@ async function rankedAccountRows(env, range) {
       FROM (
         SELECT account_id, total_tokens FROM personal_machine
         UNION ALL
-        SELECT account_id, total_tokens FROM personal_openrouter
+        SELECT account_id, total_tokens FROM personal_router
       )
       GROUP BY account_id
     ),
@@ -2502,28 +2996,28 @@ async function rankedAccountRows(env, range) {
       JOIN memberships m ON m.user_id = d.user_id AND m.status = 'active'
       WHERE d.date_utc >= ?
     ),
-    org_openrouter_raw AS (
-      SELECT m.org_id AS account_id, o.date_utc, o.openrouter_key_hash, o.total_tokens
-      FROM openrouter_daily_usage o
+    org_router_raw AS (
+      SELECT m.org_id AS account_id, o.date_utc, o.source_key, o.total_tokens
+      FROM router_daily_usage o
       JOIN memberships m ON m.user_id = o.account_id AND m.status = 'active'
       WHERE o.date_utc >= ?
       UNION ALL
-      SELECT o.account_id, o.date_utc, o.openrouter_key_hash, o.total_tokens
-      FROM openrouter_daily_usage o
+      SELECT o.account_id, o.date_utc, o.source_key, o.total_tokens
+      FROM router_daily_usage o
       JOIN accounts a ON a.id = o.account_id AND a.kind = 'org'
       WHERE o.date_utc >= ?
     ),
-    org_openrouter AS (
+    org_router AS (
       SELECT account_id, MIN(MAX(total_tokens), ?) AS total_tokens
-      FROM org_openrouter_raw
-      GROUP BY account_id, date_utc, openrouter_key_hash
+      FROM org_router_raw
+      GROUP BY account_id, date_utc, source_key
     ),
     org_totals AS (
       SELECT account_id, SUM(total_tokens) AS total_tokens, 'org' AS kind
       FROM (
         SELECT account_id, total_tokens FROM org_machine
         UNION ALL
-        SELECT account_id, total_tokens FROM org_openrouter
+        SELECT account_id, total_tokens FROM org_router
       )
       GROUP BY account_id
     ),
@@ -2974,6 +3468,7 @@ async function appPage(request, env) {
   const emails = await emailRows(env, user.id);
   const machines = await machineRows(env, user.id);
   const openRouterConnections = await openRouterConnectionRows(env, user.id);
+  const longwireConnections = await longwireConnectionRows(env, user.id);
   const memberships = await env.DB.prepare(`
     SELECT a.account_number, h.handle, a.display_name, m.role, m.status
     FROM memberships m
@@ -3024,6 +3519,7 @@ async function appPage(request, env) {
           ${handleControl}
           ${profileMetadataForm(account, { kind: "user" })}
           ${openRouterPanel(openRouterConnections, { kind: "user" })}
+          ${longwirePanel(longwireConnections, { kind: "user" })}
           <div class="list">${emails.map(emailRow).join("") || emptyState("No emails linked", "Add an email to use magic links and recover this profile.")}</div>
           <form class="form-stack" data-email data-email-action data-resend-label="Send verification again"><label for="profile-email">Add another email</label><div class="form-row"><input id="profile-email" name="email" placeholder="you@example.com" autocomplete="email"><button class="secondary">Send verification</button></div></form>
           <pre class="result" data-email-result hidden></pre>
@@ -3075,6 +3571,7 @@ async function orgsPage(request, env) {
   const selected = orgs.results.find((org) => accountRef(org) === requested || org.account_number === requested) || orgs.results[0] || null;
   const members = selected ? await orgMemberRows(env, selected.id) : [];
   const openRouterConnections = selected ? await openRouterConnectionRows(env, selected.id) : [];
+  const longwireConnections = selected ? await longwireConnectionRows(env, selected.id) : [];
   const canManage = selected && canManageOrg(selected.role);
   return layout("Organizations — Burnfolio", `
     <main class="dash org-management">
@@ -3092,7 +3589,7 @@ async function orgsPage(request, env) {
           }).join("") || emptyState("No organizations yet", "Create one from the dashboard.")}</div>
         </aside>
         <section class="panel org-detail">
-          ${selected ? orgDetail(selected, members, canManage, openRouterConnections) : emptyState("No organization selected", "Create an organization before managing members.")}
+          ${selected ? orgDetail(selected, members, canManage, openRouterConnections, longwireConnections) : emptyState("No organization selected", "Create an organization before managing members.")}
         </section>
       </section>
     </main>
@@ -3112,12 +3609,13 @@ async function orgMemberRows(env, orgID) {
   return rows.results || [];
 }
 
-function orgDetail(org, members, canManage, openRouterConnections = []) {
+function orgDetail(org, members, canManage, openRouterConnections = [], longwireConnections = []) {
   const ref = accountRef(org);
   return `
     <div class="section-head"><div><h2>${esc(org.display_name || ref)}</h2><p class="muted"><a href="/${esc(ref)}">/${esc(ref)}</a> · your role is ${esc(org.role)}</p></div></div>
     ${canManage ? profileMetadataForm(org, { kind: "org", ref }) : ""}
     ${canManage ? openRouterPanel(openRouterConnections, { kind: "org", ref }) : ""}
+    ${canManage ? longwirePanel(longwireConnections, { kind: "org", ref }) : ""}
     ${canManage ? `<form class="form-stack org-add-member" data-add-member data-org="${esc(ref)}"><label for="org-member">Invite a member or admin</label><div class="form-row"><input id="org-member" name="user" placeholder="username or account number"><select name="role"><option value="member">member</option><option value="admin">admin</option>${org.role === "owner" ? `<option value="owner">owner (transfer)</option>` : ""}</select><button>Invite</button></div></form><p class="muted">Invited members roll their usage into this org's graph once they accept.</p>` : `<p class="muted">Members can view the org here. Ask an admin or owner to change roles.</p>`}
     <div class="member-list">${members.map((member) => orgMemberRow(org, member, canManage)).join("")}</div>
   `;
@@ -3145,16 +3643,19 @@ function profileMetadataForm(account, { kind, ref = "" }) {
   </form>`;
 }
 
+function routerPanelAttrs(provider, kind, ref) {
+  return kind === "org"
+    ? `data-router="${provider}" data-router-scope="org" data-org="${esc(ref)}"`
+    : `data-router="${provider}" data-router-scope="user"`;
+}
+
 function openRouterPanel(connections, { kind, ref = "" }) {
-  const attrs = kind === "org"
-    ? `data-openrouter data-openrouter-scope="org" data-org="${esc(ref)}"`
-    : `data-openrouter data-openrouter-scope="user"`;
   const prefix = kind === "org" ? `org-openrouter-${ref}` : "openrouter";
   const keyTip = "Management keys can't perform inference — Burnfolio only uses it to read token usage analytics. Prefer to keep the key off our servers entirely? The pyro CLI can read usage locally with the same key and upload only daily totals (pyro install --openrouter-key ...), so the key never leaves your machine.";
-  return `<section class="integration-panel" ${attrs}>
+  return `<section class="integration-panel" ${routerPanelAttrs("openrouter", kind, ref)}>
     <div class="section-head compact"><div><h3>OpenRouter</h3><p class="muted">Connect a management key to import account token usage hourly.</p></div></div>
     <p class="muted openrouter-help">Needs a <strong>management</strong> key, not an inference key. <a href="https://openrouter.ai/settings/management-keys" target="_blank" rel="noopener">Create one in your OpenRouter settings</a> or see the <a href="https://openrouter.ai/docs/guides/overview/auth/management-api-keys" target="_blank" rel="noopener">management key docs</a>.</p>
-    <form class="form-stack" data-openrouter-connect>
+    <form class="form-stack" data-router-connect>
       <label for="${esc(prefix)}-key">Management key <span class="stat-tip" data-tip="${esc(keyTip)}" title="${esc(keyTip)}" tabindex="0" role="img" aria-label="About management keys">?</span></label>
       <div class="form-row">
         <input id="${esc(prefix)}-key" name="key" type="password" placeholder="sk-or-v1-..." autocomplete="off">
@@ -3162,20 +3663,41 @@ function openRouterPanel(connections, { kind, ref = "" }) {
         <button type="submit" class="secondary">Connect</button>
       </div>
     </form>
-    <div class="result inline-result" data-openrouter-result hidden></div>
-    <div class="list integration-list">${connections.map((connection) => openRouterConnectionRow(connection, kind, ref)).join("") || emptyState("No OpenRouter key connected", "Use a management key. Burnfolio stores it encrypted and imports daily totals only.")}</div>
+    <div class="result inline-result" data-router-result hidden></div>
+    <div class="list integration-list">${connections.map((connection) => routerConnectionRow("openrouter", "OpenRouter", connection, kind, ref)).join("") || emptyState("No OpenRouter key connected", "Use a management key. Burnfolio stores it encrypted and imports daily totals only.")}</div>
   </section>`;
 }
 
-function openRouterConnectionRow(connection, kind, ref) {
+function longwirePanel(connections, { kind, ref = "" }) {
+  const prefix = kind === "org" ? `org-longwire-${ref}` : "longwire";
+  const keyTip = "longwire management keys are read-only: they can't run inference or change anything. Burnfolio only uses this one to read daily token usage. Prefer to keep the key off our servers? pyro can read usage locally with the same key and upload only daily totals (pyro install --longwire-key ...).";
+  return `<section class="integration-panel" ${routerPanelAttrs("longwire", kind, ref)}>
+    <div class="section-head compact"><div><h3>longwire</h3><p class="muted">Connect a management key to import tokens used through your private inference router, hourly.</p></div></div>
+    <p class="muted openrouter-help">Needs a read-only <strong>management</strong> key (<code>lw_mk_…</code>), not an inference key (<code>lw_sk_…</code>). <a href="https://longwire.ai/keys" target="_blank" rel="noopener">Create one in longwire</a> under API Keys → Management keys. If you IP-lock the key, Burnfolio's servers can't use it.</p>
+    <form class="form-stack" data-router-connect>
+      <label for="${esc(prefix)}-key">Management key <span class="stat-tip" data-tip="${esc(keyTip)}" title="${esc(keyTip)}" tabindex="0" role="img" aria-label="About longwire management keys">?</span></label>
+      <div class="form-row">
+        <input id="${esc(prefix)}-key" name="key" type="password" placeholder="lw_mk_..." autocomplete="off">
+        <input id="${esc(prefix)}-name" name="name" type="text" maxlength="80" placeholder="Name (optional)" autocomplete="off">
+        <button type="submit" class="secondary">Connect</button>
+      </div>
+    </form>
+    <div class="result inline-result" data-router-result hidden></div>
+    <div class="list integration-list">${connections.map((connection) => routerConnectionRow("longwire", "longwire", connection, kind, ref)).join("") || emptyState("No longwire key connected", "Use a read-only management key. Burnfolio stores it encrypted and imports daily totals only.")}</div>
+  </section>`;
+}
+
+function routerConnectionRow(provider, providerLabel, connection, kind, ref) {
   const base = kind === "org"
-    ? `/api/orgs/${encodeURIComponent(ref)}/openrouter/connections/${encodeURIComponent(connection.id)}`
-    : `/api/openrouter/connections/${encodeURIComponent(connection.id)}`;
-  const state = connection.status === "error" ? `Error${connection.last_error ? `: ${connection.last_error}` : ""}` : connection.last_sync_at ? `Synced ${formatDate(connection.last_sync_at.slice(0, 10))}` : "Waiting for first sync";
-  const label = connection.label || "OpenRouter";
-  return `<div class="row integration-row" data-openrouter-connection="${esc(connection.id)}" data-openrouter-base="${esc(base)}">
+    ? `/api/orgs/${encodeURIComponent(ref)}/${provider}/connections/${encodeURIComponent(connection.id)}`
+    : `/api/${provider}/connections/${encodeURIComponent(connection.id)}`;
+  let state = connection.status === "error" ? `Error${connection.last_error ? `: ${connection.last_error}` : ""}` : connection.last_sync_at ? `Synced ${formatDate(connection.last_sync_at.slice(0, 10))}` : "Waiting for first sync";
+  if (connection.status !== "error" && connection.last_error) state += ` · ${connection.last_error}`;
+  if (connection.needs_reconnect) state += " · Paused until you reconnect or sync manually";
+  const label = connection.label || providerLabel;
+  return `<div class="row integration-row" data-router-connection="${esc(connection.id)}" data-router-base="${esc(base)}">
     <div><strong title="${esc(label)}">${esc(label)}</strong><span>${esc(state)}</span></div>
-    <div class="row-actions"><button type="button" class="secondary" data-openrouter-sync>Sync now</button><button type="button" class="secondary" data-openrouter-delete>Remove</button></div>
+    <div class="row-actions"><button type="button" class="secondary" data-router-sync>Sync now</button><button type="button" class="secondary" data-router-delete>Remove</button></div>
   </div>`;
 }
 
@@ -3896,7 +4418,7 @@ function howWeCountPage(isSignedIn = false) {
           <p><code>pyro</code> reads supported local session records for Claude, Codex, OpenCode, and Pi, normalizes token usage, and syncs daily totals to your profile.</p>
           <p>Each square represents the total tokens Burnfolio has received for that day. Higher totals render hotter cells.</p>
           <p>A day's total is input + cache read + cache write + output tokens. Reasoning tokens are informational only and are not added to the total, since providers generally already include them in the output count.</p>
-          <p>Each source (a machine or an OpenRouter connection) is capped at a configurable per-day ceiling to keep a single misconfigured client from distorting a graph. Raw usage is always stored; only the displayed total is capped.</p>
+          <p>Each source (a machine, or an OpenRouter or longwire connection) is capped at a configurable per-day ceiling to keep a single misconfigured client from distorting a graph. Raw usage is always stored; only the displayed total is capped.</p>
           <p>A profile can also show a per-tool and per-model breakdown of its burn ("What's burning"). It's off by default — the profile owner turns it on from their dashboard, and it's the only piece of usage detail that's opt-in rather than shown automatically.</p>
         </article>
         <article class="learn-card">
@@ -3912,6 +4434,10 @@ function howWeCountPage(isSignedIn = false) {
         <article class="learn-card">
           <h2>OpenRouter imports</h2>
           <p>OpenRouter management keys can import daily account totals. Burnfolio stores those rows separately from machine-local inference data and deduplicates by profile, key fingerprint, and day.</p>
+        </article>
+        <article class="learn-card">
+          <h2>longwire imports</h2>
+          <p>Read-only longwire management keys import the tokens your account consumed through its private inference router, per UTC day: requests, input (prompt) and output (completion) tokens. longwire doesn't report cache or reasoning tokens, so those count as zero. The last week is re-fetched each hour because longer requests are logged when they finish.</p>
         </article>
         <article class="learn-card">
           <h2>Duplicate protection</h2>
@@ -3951,10 +4477,10 @@ function privacyPage(isSignedIn = false) {
       <section class="learn-grid">
         <article class="learn-card">
           <h2>What we collect</h2>
-          <p>Per synced day, per machine or OpenRouter connection: the date, a request count, and six token counters (input, cache read, cache write, output, reasoning, and total).</p>
+          <p>Per synced day, per machine or OpenRouter/longwire connection: the date, a request count, and six token counters (input, cache read, cache write, output, reasoning, and total).</p>
           <p><code>pyro</code> also computes a per-CLI and per-model breakdown of those same six counters locally and includes it in the sync payload. We store that breakdown too — it's still counts only, per tool and per model, per day; no prompts, file paths, or session identifiers are ever part of it. This breakdown is only shown on your public profile if you turn it on; it's off by default.</p>
           <p>Account data: an account number and key, an optional email address (for magic-link sign-in and recovery), an optional handle, and any bio or profile links you choose to add.</p>
-          <p>OpenRouter keys you connect from the dashboard are encrypted at rest. Keys <code>pyro</code> imports from your local OpenRouter config never leave your machine — only a SHA-256 fingerprint of the key and daily usage totals are uploaded.</p>
+          <p>OpenRouter and longwire keys you connect from the dashboard are encrypted at rest. Keys <code>pyro</code> reads locally (<code>--openrouter-key</code>, <code>--longwire-key</code>) never leave your machine — only a SHA-256 fingerprint of the key and daily usage totals are uploaded.</p>
         </article>
         <article class="learn-card">
           <h2>What we never collect</h2>
@@ -4291,7 +4817,7 @@ function badgeProgressLabel(def, bundle) {
     case "weekend_warrior": return `${bundle.weekendActiveDays} / 10 weekend days`;
     case "open_book": return "add a bio and a link";
     case "team_player": return "join or accept an org invite";
-    case "router": return "connect OpenRouter";
+    case "router": return "connect OpenRouter or longwire";
     case "billion_token_brain": return `${fmt(bundle.lifetimeTokens)} / ${fmt(1_000_000_000)} tokens`;
     case "epoch": return `${Math.max(bundle.currentStreak, bundle.longestStreak)} / 30 day streak`;
     case "overclocked": return `${fmt(bundle.bestDayTokens)} / ${fmt(100_000_000)} best day`;
@@ -4391,8 +4917,8 @@ async function historyPanel(env, account) {
   ]);
   if (!componentRows.length) {
     return `<section class="panel history-panel">
-      <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show recent activity.</p></div></div>
-      ${emptyState("No usage yet", "Sync with pyro or connect OpenRouter to start filling in your history.")}
+      <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter/longwire connections. Exports cover full history; the chart and table below show recent activity.</p></div></div>
+      ${emptyState("No usage yet", "Sync with pyro or connect OpenRouter or longwire to start filling in your history.")}
     </section>`;
   }
 
@@ -4429,7 +4955,7 @@ async function historyPanel(env, account) {
   }
 
   return `<section class="panel history-panel">
-    <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter connections. Exports cover full history; the chart and table below show the last ${HISTORY_CHART_DAYS} days.</p></div></div>
+    <div class="section-head"><div><h2>Your history</h2><p class="muted">Personal usage across your machines and OpenRouter/longwire connections. Exports cover full history; the chart and table below show the last ${HISTORY_CHART_DAYS} days.</p></div></div>
     <div class="history-chart-wrap">${historyBarChartSVG(last90)}</div>
     ${historyToolSplit(toolTotals90)}
     <div class="history-actions">
@@ -4890,6 +5416,13 @@ function dashboardScript(profileRef) {
         openrouter_management_key_required: "Use an OpenRouter management key, not a regular inference key.",
         openrouter_key_storage_not_configured: "OpenRouter key storage is not configured yet.",
         openrouter_fetch_failed: "OpenRouter usage could not be fetched right now.",
+        invalid_longwire_key: "Enter a longwire management key (it starts with lw_mk_).",
+        longwire_inference_key: "That's a longwire inference key. Burnfolio needs a read-only management key.",
+        longwire_management_key_required: "Use a longwire management key, not an inference key.",
+        longwire_key_rejected: "longwire rejected this key. It may have been revoked or expired.",
+        longwire_rate_limited: "longwire is rate limiting this key. Try again in a few minutes.",
+        longwire_unavailable: "longwire usage could not be fetched right now.",
+        longwire_not_found: "That longwire connection was not found.",
         email_already_claimed: "That email is already attached to another account.",
         email_send_failed: "The email could not be sent. Try again shortly.",
         org_handle_unavailable: "That organization username is already taken.",
@@ -5065,12 +5598,15 @@ function dashboardScript(profileRef) {
         restoreButton(button);
       }
     });
-    document.querySelectorAll("[data-openrouter]").forEach(panel => {
-      const result = panel.querySelector("[data-openrouter-result]");
-      const connect = panel.querySelector("[data-openrouter-connect]");
-      const endpoint = panel.dataset.openrouterScope === "org"
-        ? "/api/orgs/" + encodeURIComponent(panel.dataset.org) + "/openrouter/connections"
-        : "/api/openrouter/connections";
+    const routerNames = { openrouter: "OpenRouter", longwire: "longwire" };
+    document.querySelectorAll("[data-router]").forEach(panel => {
+      const provider = panel.dataset.router;
+      const name = routerNames[provider] || provider;
+      const result = panel.querySelector("[data-router-result]");
+      const connect = panel.querySelector("[data-router-connect]");
+      const endpoint = panel.dataset.routerScope === "org"
+        ? "/api/orgs/" + encodeURIComponent(panel.dataset.org) + "/" + provider + "/connections"
+        : "/api/" + provider + "/connections";
       function show(message) {
         if (!result) return;
         result.hidden = false;
@@ -5080,36 +5616,36 @@ function dashboardScript(profileRef) {
         event.preventDefault();
         const button = submitButton(connect);
         setBusy(button, "Connecting...");
-        show("Checking OpenRouter key...");
+        show("Checking " + name + " key...");
         try {
           const { ok, data } = await post(connect, endpoint);
-          show(ok ? "Connected. Usage import is running." : messageFor(data));
+          show(ok ? "Connected. Usage import is running." : (data && data.message) || messageFor(data));
           ok ? setTimeout(() => location.reload(), 900) : restoreButton(button);
         } catch {
           show("Something went wrong. Check the key and try again.");
           restoreButton(button);
         }
       });
-      panel.querySelectorAll("[data-openrouter-sync]").forEach(button => button.addEventListener("click", async () => {
-        const row = button.closest("[data-openrouter-connection]");
+      panel.querySelectorAll("[data-router-sync]").forEach(button => button.addEventListener("click", async () => {
+        const row = button.closest("[data-router-connection]");
         setBusy(button, "Syncing...");
-        show("Fetching OpenRouter usage...");
+        show("Fetching " + name + " usage...");
         try {
-          const res = await fetch(row.dataset.openrouterBase + "/sync", { method:"POST" });
+          const res = await fetch(row.dataset.routerBase + "/sync", { method:"POST" });
           const data = await res.json();
-          show(res.ok ? "OpenRouter usage synced." : messageFor(data));
+          show(res.ok ? name + " usage synced." : (data && data.message) || messageFor(data));
           res.ok ? setTimeout(() => location.reload(), 900) : restoreButton(button);
         } catch {
-          show("OpenRouter usage could not be fetched right now.");
+          show(name + " usage could not be fetched right now.");
           restoreButton(button);
         }
       }));
-      panel.querySelectorAll("[data-openrouter-delete]").forEach(button => button.addEventListener("click", async () => {
-        if (!confirm("Remove this OpenRouter connection? Imported usage will remain on the graph.")) return;
-        const row = button.closest("[data-openrouter-connection]");
+      panel.querySelectorAll("[data-router-delete]").forEach(button => button.addEventListener("click", async () => {
+        if (!confirm("Remove this " + name + " connection? Imported usage will remain on the graph.")) return;
+        const row = button.closest("[data-router-connection]");
         setBusy(button, "Removing...");
         try {
-          const res = await fetch(row.dataset.openrouterBase, { method:"DELETE" });
+          const res = await fetch(row.dataset.routerBase, { method:"DELETE" });
           const data = await res.json().catch(() => ({}));
           if (res.ok) location.reload();
           else {
@@ -5239,6 +5775,13 @@ function orgManagementScript() {
         openrouter_management_key_required: "Use an OpenRouter management key, not a regular inference key.",
         openrouter_key_storage_not_configured: "OpenRouter key storage is not configured yet.",
         openrouter_fetch_failed: "OpenRouter usage could not be fetched right now.",
+        invalid_longwire_key: "Enter a longwire management key (it starts with lw_mk_).",
+        longwire_inference_key: "That's a longwire inference key. Burnfolio needs a read-only management key.",
+        longwire_management_key_required: "Use a longwire management key, not an inference key.",
+        longwire_key_rejected: "longwire rejected this key. It may have been revoked or expired.",
+        longwire_rate_limited: "longwire is rate limiting this key. Try again in a few minutes.",
+        longwire_unavailable: "longwire usage could not be fetched right now.",
+        longwire_not_found: "That longwire connection was not found.",
         org_not_found: "Organization not found.",
         forbidden: "Only org admins or owners can manage members.",
         owner_required: "Only the current owner can transfer ownership.",
@@ -5314,10 +5857,13 @@ function orgManagementScript() {
         restoreControl(button);
       }
     }));
-    document.querySelectorAll("[data-openrouter]").forEach(panel => {
-      const result = panel.querySelector("[data-openrouter-result]");
-      const connect = panel.querySelector("[data-openrouter-connect]");
-      const endpoint = "/api/orgs/" + encodeURIComponent(panel.dataset.org) + "/openrouter/connections";
+    const routerNames = { openrouter: "OpenRouter", longwire: "longwire" };
+    document.querySelectorAll("[data-router]").forEach(panel => {
+      const provider = panel.dataset.router;
+      const name = routerNames[provider] || provider;
+      const result = panel.querySelector("[data-router-result]");
+      const connect = panel.querySelector("[data-router-connect]");
+      const endpoint = "/api/orgs/" + encodeURIComponent(panel.dataset.org) + "/" + provider + "/connections";
       function show(message) {
         if (!result) return;
         result.hidden = false;
@@ -5328,35 +5874,35 @@ function orgManagementScript() {
         const button = submitButton(connect);
         const body = Object.fromEntries(new FormData(connect).entries());
         setBusy(button, "Connecting...");
-        show("Checking OpenRouter key...");
+        show("Checking " + name + " key...");
         try {
           const { ok, data } = await send(endpoint, "POST", body);
-          show(ok ? "Connected. Usage import is running." : messageFor(data));
+          show(ok ? "Connected. Usage import is running." : (data && data.message) || messageFor(data));
           ok ? setTimeout(() => location.reload(), 900) : restoreControl(button);
         } catch {
           show("Something went wrong. Check the key and try again.");
           restoreControl(button);
         }
       });
-      panel.querySelectorAll("[data-openrouter-sync]").forEach(button => button.addEventListener("click", async () => {
-        const row = button.closest("[data-openrouter-connection]");
+      panel.querySelectorAll("[data-router-sync]").forEach(button => button.addEventListener("click", async () => {
+        const row = button.closest("[data-router-connection]");
         setBusy(button, "Syncing...");
-        show("Fetching OpenRouter usage...");
+        show("Fetching " + name + " usage...");
         try {
-          const { ok, data } = await send(row.dataset.openrouterBase + "/sync", "POST");
-          show(ok ? "OpenRouter usage synced." : messageFor(data));
+          const { ok, data } = await send(row.dataset.routerBase + "/sync", "POST");
+          show(ok ? name + " usage synced." : (data && data.message) || messageFor(data));
           ok ? setTimeout(() => location.reload(), 900) : restoreControl(button);
         } catch {
-          show("OpenRouter usage could not be fetched right now.");
+          show(name + " usage could not be fetched right now.");
           restoreControl(button);
         }
       }));
-      panel.querySelectorAll("[data-openrouter-delete]").forEach(button => button.addEventListener("click", async () => {
-        if (!confirm("Remove this OpenRouter connection? Imported usage will remain on the graph.")) return;
-        const row = button.closest("[data-openrouter-connection]");
+      panel.querySelectorAll("[data-router-delete]").forEach(button => button.addEventListener("click", async () => {
+        if (!confirm("Remove this " + name + " connection? Imported usage will remain on the graph.")) return;
+        const row = button.closest("[data-router-connection]");
         setBusy(button, "Removing...");
         try {
-          const { ok, data } = await send(row.dataset.openrouterBase, "DELETE");
+          const { ok, data } = await send(row.dataset.routerBase, "DELETE");
           ok ? location.reload() : show(messageFor(data));
           if (!ok) restoreControl(button);
         } catch {
@@ -5650,7 +6196,7 @@ function tooLarge(request, maxBytes) {
 function rejectCrossOrigin(request, path) {
   if (!path.startsWith("/api/")) return null;
   if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return null;
-  if (path === "/api/ingest" || path === "/api/openrouter/ingest") return null;
+  if (path === "/api/ingest" || path === "/api/openrouter/ingest" || path === "/api/longwire/ingest") return null;
   const origin = request.headers.get("Origin");
   if (!origin) return null;
   try {
